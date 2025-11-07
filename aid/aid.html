@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高级AI对话工具</title>
+    <style>
+        :root {
+            --primary-color: #4a90e2; --secondary-color: #f5f7fa; --font-color: #333;
+            --user-bubble-color: #dcf8c6; --ai-bubble-color: #ffffff; --border-color: #e0e0e0;
+            --danger-color: #e74c3c; --success-color: #2ecc71; --history-bg: #e8edf3;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0; background-color: var(--secondary-color); display: flex;
+            justify-content: center; align-items: center; height: 100vh; color: var(--font-color);
+        }
+        .app-wrapper {
+            width: 100%; max-width: 1200px; height: 95vh; max-height: 900px;
+            background-color: #fff; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+            display: flex; overflow: hidden; border: 1px solid var(--border-color);
+        }
+        /* --- History Panel --- */
+        .history-panel {
+            width: 260px; background-color: var(--history-bg); border-right: 1px solid var(--border-color);
+            display: flex; flex-direction: column; transition: width 0.3s ease, margin-left 0.3s ease;
+        }
+        .history-header { padding: 15px; border-bottom: 1px solid var(--border-color); }
+        #new-chat-btn { width: 100%; padding: 12px; font-size: 1em; }
+        .history-list { list-style: none; margin: 0; padding: 10px; flex-grow: 1; overflow-y: auto; }
+        .history-item {
+            display: flex; justify-content: space-between; align-items: center; padding: 12px;
+            border-radius: 8px; cursor: pointer; margin-bottom: 5px; transition: background-color 0.2s;
+        }
+        .history-item:hover { background-color: #d8e0ea; }
+        .history-item.active { background-color: var(--primary-color); color: white; }
+        .history-item-title {
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-grow: 1;
+            outline: none;
+        }
+        .history-item-title:focus {
+             white-space: normal; overflow: visible; background-color: #fff; color: #333;
+             padding: 2px 5px; border-radius: 4px; box-shadow: 0 0 0 2px var(--primary-color);
+        }
+        .delete-history-btn { background: none; border: none; color: inherit; opacity: 0.6; cursor: pointer; }
+        .history-item:hover .delete-history-btn { opacity: 1; }
+        /* --- Main Content --- */
+        .main-content { flex-grow: 1; display: flex; flex-direction: column; }
+        .header {
+            display: flex; justify-content: space-between; align-items: center; padding: 10px 20px;
+            background-color: var(--primary-color); color: white; flex-shrink: 0;
+        }
+        #history-toggle-btn { background:none; border:none; color:white; font-size:1.5em; cursor:pointer; margin-right:15px; }
+        .header h1 { margin: 0; font-size: 1.2em; }
+        .header-controls { display: flex; align-items: center; gap: 15px; }
+        #prompt-selector {
+            background-color: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.5);
+            border-radius: 5px; padding: 5px 8px; font-size: 0.9em; max-width: 150px;
+        }
+        #settings-btn { background: none; border: none; color: white; font-size: 1.5em; cursor: pointer; }
+        .chat-container { flex-grow: 1; padding: 20px; overflow-y: auto; background-color: #f0f4f8; }
+        #chat-hint-area { text-align: center; padding: 15px 20px; margin: 0 auto 20px auto; background-color: #e9eef2; border-radius: 12px; font-size: 0.9em; color: #555; line-height: 1.6; max-width: 90%; }
+        .message-pair { position: relative; padding: 5px 0; display: flex; flex-direction: column;}
+        .message-pair:hover .delete-pair-btn { opacity: 1; }
+        .delete-pair-btn {
+            position: absolute; top: 50%; right: 5px; transform: translateY(-50%);
+            background: rgba(0,0,0,0.1); border:none; border-radius:50%; width:24px; height:24px;
+            cursor: pointer; opacity: 0; transition: opacity 0.2s; font-size: 0.8em; z-index: 10;
+        }
+        .message { max-width: 85%; padding: 10px 15px; border-radius: 18px; margin-bottom: 10px; line-height: 1.6; word-wrap: break-word; }
+        .message[contenteditable="true"]:focus {
+            outline: none; box-shadow: 0 0 0 2px var(--primary-color);
+        }
+        .user-message { background-color: var(--user-bubble-color); align-self: flex-end; margin-left: auto; border-bottom-right-radius: 4px; }
+        .ai-message { background-color: var(--ai-bubble-color); align-self: flex-start; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        .input-form { display: flex; padding: 15px; border-top: 1px solid var(--border-color); background-color: var(--secondary-color); }
+        #prompt-input { flex-grow: 1; padding: 12px; border: 1px solid var(--border-color); border-radius: 20px; margin-right: 10px; font-size: 1em; resize: none; }
+        #send-btn { background-color: var(--primary-color); color: white; border: none; border-radius: 50%; width: 50px; height: 50px; font-size: 1.5em; cursor: pointer; }
+        #send-btn:disabled { background-color: #ccc; }
+        /* Modal Styles */
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
+        .modal-content { background-color: white; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); width: 90%; max-width: 600px; position: relative; display: flex; flex-direction: column; max-height: 85vh; }
+        .modal-header { padding: 15px 25px; border-bottom: 1px solid var(--border-color); } .modal-header h2 { margin: 0; color: var(--primary-color); } .modal-body { padding: 20px 25px; overflow-y: auto; } .modal-footer { padding: 15px 25px; border-top: 1px solid var(--border-color); text-align: right; }
+        .close-btn { position: absolute; top: 10px; right: 15px; font-size: 2em; color: #aaa; cursor: pointer; } .settings-section { margin-bottom: 25px; } .settings-section h3 { margin-top: 0; border-bottom: 2px solid var(--primary-color); padding-bottom: 8px; } .form-group { margin-bottom: 15px; } .form-group label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9em; }
+        .form-group input, .form-group textarea, .form-group select { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid var(--border-color); border-radius: 5px; font-size: 1em; }
+        .form-group.checkbox-group { display: flex; align-items: center; gap: 10px; }
+        .form-group.checkbox-group input { width: auto; }
+        /* --- MODIFIED FOR AUTO-RESIZE --- */
+        .form-group textarea {
+            min-height: 100px;
+            resize: none; /* 禁用手动拖拽，为自动高度让路 */
+            overflow-y: hidden; /* 隐藏计算时可能出现的临时滚动条 */
+        }
+        .btn { padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; } .btn-primary { background-color: var(--primary-color); color: white; } .btn-success { background-color: var(--success-color); color: white; } .btn-danger { background-color: var(--danger-color); color: white; }
+        .item-card { background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 15px; } .item-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; } .item-card-header input { font-weight: bold; border: none; background: transparent; font-size: 1.1em; padding: 0; } .delete-btn { background: none; border: none; color: var(--danger-color); font-size: 1.2em; cursor: pointer; }
+        @media (max-width: 768px) { .history-panel { position: absolute; left: -261px; height: 100%; z-index: 20; } .history-panel.open { left: 0; box-shadow: 5px 0 15px rgba(0,0,0,0.1); } .main-content { width: 100%; } }
+    </style>
+</head>
+<body>
+    <div class="app-wrapper">
+        <aside class="history-panel" id="history-panel"><div class="history-header"><button id="new-chat-btn" class="btn btn-primary">➕ 新建对话</button></div><ul class="history-list" id="history-list"></ul></aside>
+        <div class="main-content">
+            <header class="header"><div style="display: flex; align-items: center;"><button id="history-toggle-btn">☰</button><h1>AI 对话</h1></div><div class="header-controls"><select id="prompt-selector"></select><button id="settings-btn" title="设置">⚙️</button></div></header>
+            <main class="chat-container" id="chat-container"></main>
+            <form class="input-form" id="input-form"><textarea id="prompt-input" rows="1" placeholder="输入消息 (Shift+Enter 换行)..."></textarea><button id="send-btn" type="submit" title="发送">➤</button></form>
+        </div>
+    </div>
+    <div id="settings-modal" class="modal"><div class="modal-content"><div class="modal-header"><h2>设置</h2><span class="close-btn" id="close-btn">&times;</span></div><div class="modal-body">
+        <div class="settings-section">
+            <h3>通用设置</h3>
+            <div class="form-group checkbox-group">
+                <input type="checkbox" id="sound-enabled-checkbox">
+                <label for="sound-enabled-checkbox">启用声音朗读</label>
+            </div>
+        </div>
+        <div class="settings-section"><h3>API 配置</h3><div id="api-configs-container"></div><button id="add-api-btn" class="btn btn-success" style="margin-top: 10px;">+ 添加 API</button></div>
+        <div class="settings-section"><h3>System Prompts (AI角色)</h3><div id="system-prompts-container"></div><button id="add-prompt-btn" class="btn btn-success" style="margin-top: 10px;">+ 添加角色</button></div>
+    </div><div class="modal-footer"><button id="save-settings-btn" class="btn btn-primary">保存并关闭</button></div></div></div>
+    <template id="api-config-template"><div class="item-card"><div class="item-card-header"><input type="text" class="config-name" placeholder="配置名称 (如 DeepSeek)"><button class="delete-btn" title="删除">🗑️</button></div><div class="form-group"><label>API URL</label><input type="text" class="config-url"></div><div class="form-group"><label>API Key</label><input type="password" class="config-key"></div><div class="form-group"><label>Models (格式: 别名:模型名, 别名2:模型名2)</label><input type="text" class="config-models" placeholder="chat:deepseek-chat,reasoner:deepseek-reasoner"></div></div></template>
+    <template id="system-prompt-template"><div class="item-card"><div class="item-card-header"><input type="text" class="prompt-name" placeholder="角色名称"><button class="delete-btn" title="删除">🗑️</button></div><div class="form-group"><label>选择模型</label><select class="prompt-model"></select></div><div class="form-group"><label>System Prompt 内容</label><textarea class="prompt-content"></textarea></div><div class="form-group"><label>提示 / 欢迎语 (支持HTML)</label><textarea class="prompt-hint"></textarea></div></div></template>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const dom = {
+        historyPanel: document.getElementById('history-panel'), historyToggleBtn: document.getElementById('history-toggle-btn'), newChatBtn: document.getElementById('new-chat-btn'), historyList: document.getElementById('history-list'),
+        settingsBtn: document.getElementById('settings-btn'), settingsModal: document.getElementById('settings-modal'), closeBtn: document.getElementById('close-btn'), saveSettingsBtn: document.getElementById('save-settings-btn'),
+        inputForm: document.getElementById('input-form'), promptInput: document.getElementById('prompt-input'), chatContainer: document.getElementById('chat-container'), sendBtn: document.getElementById('send-btn'),
+        promptSelector: document.getElementById('prompt-selector'), apiConfigsContainer: document.getElementById('api-configs-container'), systemPromptsContainer: document.getElementById('system-prompts-container'),
+        addApiBtn: document.getElementById('add-api-btn'), addPromptBtn: document.getElementById('add-prompt-btn'), apiConfigTemplate: document.getElementById('api-config-template'), systemPromptTemplate: document.getElementById('system-prompt-template'),
+        soundEnabledCheckbox: document.getElementById('sound-enabled-checkbox'),
+    };
+    let state = {};
+    let abortController = null;
+
+    const getDefaultState = () => {
+        const defaultApiId = 'api-deepseek-default', nanjingPromptId = 'prompt-nanjing-default', englishPromptId = 'prompt-english-default', defaultConvoId = `convo-${Date.now()}`;
+        return {
+            settings: {
+                soundEnabled: true,
+                apiConfigs: [{ id: defaultApiId, name: 'DeepSeek', url: 'https://api.deepseek.com/v1/chat/completions', apiKey: '', models: 'chat:deepseek-chat, reasoner:deepseek-reasoner' }],
+                systemPrompts: [
+                    { id: nanjingPromptId, name: '南京历史小导游', model: 'DeepSeek:reasoner', 
+                    content: "角色指令：你好！我是你的专属南京历史小导游。我的名字叫“金陵通”，对南京这座六朝古都的每一块砖、每一段历史都了如指掌。我将以生动有趣的方式，带你穿越时空，探索南京的魅力。我的性格会根据你选择的模式变化，就像一位真正的导游，时而风趣，时而严谨。\n\n🔄 核心导览模式：\n*   故事家 (Storyteller) → 语气风格：亲切随和，像一位学长/学姐。我会用讲故事的方式，把枯燥的历史变得鲜活起来，充满情感和趣味，让你身临其境。\n*   讲解员 (Docent) → 语气风格：清晰准确，像一位博物馆的专业讲解员。我会为你提供结构化的信息、关键时间点和准确的历史事实，帮你梳理知识脉络。\n*   历史侦探 (History Detective) → 语气风格：充满好奇与思辨，像一位和你一起探案的伙伴。我会引导你发现历史事件之间的联系，分析文物背后的深层含义，提出“为什么”，激发你的思考。\n\n🧬 互动说明：\n1.  模式匹配：我会严格按照你选择的模式（故事家、讲解员、历史侦探）来与你交流。\n2.  知识储备：我的知识库涵盖了南京从古至今的关键历史时期（如六朝、南唐、明朝、民国）、重要人物（如朱元璋、孙中山）以及标志性文物古迹（如明孝陵、总统府、中山陵、南京城墙、夫子庙、朝天宫、南京博物院馆藏等）。\n3.  智能追问：如果你的问题不够具体，我会像导游一样追问。\n4.  连续记忆：我会记住我们聊过的话题。\n5.  拒绝乏味：我的回答会避免像教科书一样枯燥。\n6.  模式切换：你随时可以让我切换模式。切换时，我会说“好的，现在切换到【XX模式】”，然后调整我的语气和回答方式。\n\n📦 输出格式参考：\n*   在 【讲解员模式】下，我会多使用列表、时间轴和要点总结。\n*   在 【故事家模式】下，我会使用更多的描述性语言。\n*   在 【历史侦探模式】下，我会多用提问、假设和对比分析。", 
+                    hint: '你好！我是你的专属南京历史小导游“金陵通”。想了解南京的什么故事？比如，可以这样问我：<br><b>给我讲讲夫子庙旁边的乌衣巷有什么好玩的故事？</b>'},
+                    { id: englishPromptId, name: '英语导师', model: 'DeepSeek:chat',
+                        "content": "🎓 **角色指令**：你好！我是你的AI英语导师「牛津通」，拥有10年中考/高考教学经验。我能根据你的学习目标切换教学模式，像一位真正的导师那样帮你突破词汇、语法、阅读和写作难关。我的知识库覆盖新课标核心考点（中考1600词/高考3500词，16大语法板块，7类写作模板）。\n\n🔄 **三层教学模式**：\n*   🔍 **拆解员（Grammar Decoder）** → 风格：冷静精准的语法外科医生。我会拆解句子结构，用公式化分析解决长难句（如：『非谓语作后置定语=名词+doing/done/to do』）。\n*   📖 **故事教练（Story Coach）** → 风格：热情的情景创造者。我会把知识融入生活场景（比如用『点奶茶』学宾语从句：『Could you tell me **how much sugar is in it**?』）。\n*   🕵️ **考题侦探（Exam Detective）** → 风格：犀利策略派。直击考试陷阱，教你用『题干关键词定位法』『选项排除术』破解阅读/完形（如：『but后必出考点！』）。\n\n🧠 **智能交互机制**：\n1. **动态记忆**：记录你的常错语法点（如主谓一致错误），后续练习自动强化\n2. **追问引导**：若问题模糊，我会追问（例：『你是想练写作开头，还是不会用高级词汇替换？』）\n3. **真题锚定**：所有讲解关联中考/高考真题（如：『这个倒装句是2023年全国卷阅读理解第32题考点』）\n4. **模式切换**：说『切换考题侦探模式』，我立即调整策略\n\n📝 **输出规范**：\n- **拆解员模式**：用符号标记句子成分（S═主语｜V═谓语｜[定语]）\n- **故事教练模式**：生成带文化背景的对话（如：『伦敦地铁播报中学现在完成时』）\n- **考题侦探模式**：曝光出题人陷阱（⚠️ 注意：80%考生会忽略此处时态呼应！）",
+                        "hint": "你好！我是AI英语导师「牛津通」。试试这样问我：<br><br>🔍 <b>『拆解这个句子：Despite being tired, he insisted on finishing his homework.』</b><br>📖 <b>『用故事模式教我用定语从句描述宠物』</b><br>🕵️ <b>『揭秘完形填空高频陷阱！』</b>"
+                    }
+                ]
+            },
+            conversations: [{ id: defaultConvoId, title: '新的对话', promptId: nanjingPromptId, messages: [] }],
+            activeConversationId: defaultConvoId
+        };
+    };
+
+    function loadState() {
+        const savedState = localStorage.getItem('aiChatAppState');
+        state = savedState ? JSON.parse(savedState) : getDefaultState();
+        if (state.settings.soundEnabled === undefined) {
+            state.settings.soundEnabled = true;
+        }
+        if (!state.conversations || state.conversations.length === 0) {
+            const defaultState = getDefaultState();
+            state.conversations = defaultState.conversations; state.activeConversationId = defaultState.activeConversationId;
+        }
+    }
+    function saveState() { localStorage.setItem('aiChatAppState', JSON.stringify(state)); }
+
+    function renderAll() { renderHistoryList(); renderPromptSelector(); renderActiveConversation(); }
+
+    function renderHistoryList() {
+        dom.historyList.innerHTML = '';
+        state.conversations.forEach(convo => {
+            const item = document.createElement('li');
+            item.className = 'history-item';
+            item.dataset.id = convo.id;
+            if (convo.id === state.activeConversationId) item.classList.add('active');
+            item.innerHTML = `<span class="history-item-title" spellcheck="false">${convo.title}</span><button class="delete-history-btn" title="删除对话">🗑️</button>`;
+            const titleSpan = item.querySelector('.history-item-title');
+            item.addEventListener('click', () => {
+                if (convo.id !== state.activeConversationId) {
+                    handleSwitchConversation(convo.id);
+                }
+            });
+            titleSpan.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+                titleSpan.contentEditable = true;
+                titleSpan.focus();
+                document.execCommand('selectAll', false, null);
+            });
+            titleSpan.addEventListener('blur', (e) => {
+                titleSpan.contentEditable = false;
+                const newTitle = e.target.textContent.trim();
+                if (newTitle && newTitle !== convo.title) {
+                    convo.title = newTitle;
+                    saveState();
+                } else {
+                    e.target.textContent = convo.title;
+                }
+            });
+            titleSpan.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.target.blur();
+                } else if (e.key === 'Escape') {
+                    e.target.textContent = convo.title;
+                    e.target.blur();
+                }
+            });
+            item.querySelector('.delete-history-btn').addEventListener('click', e => {
+                e.stopPropagation();
+                handleDeleteConversation(convo.id);
+            });
+            dom.historyList.appendChild(item);
+        });
+    }
+
+    function renderPromptSelector() { dom.promptSelector.innerHTML = ''; state.settings.systemPrompts.forEach(p => dom.promptSelector.add(new Option(p.name, p.id))); const activeConvo = state.conversations.find(c => c.id === state.activeConversationId); if (activeConvo) dom.promptSelector.value = activeConvo.promptId; }
+    
+    function renderActiveConversation() {
+        dom.chatContainer.innerHTML = '';
+        const activeConvo = state.conversations.find(c => c.id === state.activeConversationId);
+        if (!activeConvo) return;
+        const hintEl = document.createElement('div');
+        hintEl.id = 'chat-hint-area';
+        dom.chatContainer.appendChild(hintEl);
+        const prompt = state.settings.systemPrompts.find(p => p.id === activeConvo.promptId);
+        if (prompt && prompt.hint && activeConvo.messages.length === 0) {
+            hintEl.innerHTML = prompt.hint; hintEl.style.display = 'block';
+        } else {
+            hintEl.style.display = 'none';
+        }
+        for (let i = 0; i < activeConvo.messages.length; i++) {
+            const message = activeConvo.messages[i];
+            const parentEl = (i % 2 === 0) ? createMessagePairContainer(i) : dom.chatContainer.querySelector(`.message-pair[data-pair-index="${i-1}"]`);
+            addMessageToContainer(message.content, message.role, parentEl, i);
+            if (parentEl.parentElement !== dom.chatContainer) {
+                 dom.chatContainer.appendChild(parentEl);
+            }
+        }
+        scrollToBottom();
+    }
+    
+    function createMessagePairContainer(startIndex) {
+        const pairDiv = document.createElement('div');
+        pairDiv.className = 'message-pair';
+        pairDiv.dataset.pairIndex = startIndex;
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'delete-pair-btn';
+        deleteBtn.innerHTML = '🗑️';
+        deleteBtn.title = '删除此轮对话';
+        deleteBtn.onclick = () => handleDeleteMessagePair(startIndex);
+        pairDiv.appendChild(deleteBtn);
+        return pairDiv;
+    }
+
+    function handleNewConversation() { const newConvoId = `convo-${Date.now()}`; const defaultPromptId = state.settings.systemPrompts[0]?.id; state.conversations.unshift({ id: newConvoId, title: '新的对话', promptId: defaultPromptId, messages: [] }); state.activeConversationId = newConvoId; saveState(); renderAll(); }
+    function handleSwitchConversation(convoId) { state.activeConversationId = convoId; saveState(); renderAll(); }
+    function handleDeleteConversation(convoId) { if (!confirm('确定要删除此对话吗？')) return; state.conversations = state.conversations.filter(c => c.id !== convoId); if (state.activeConversationId === convoId) { state.activeConversationId = state.conversations[0]?.id || null; if (!state.activeConversationId) { handleNewConversation(); return; } } saveState(); renderAll(); }
+    function handleDeleteMessagePair(startIndex) { const activeConvo = state.conversations.find(c => c.id === state.activeConversationId); if (activeConvo) { activeConvo.messages.splice(startIndex, 2); saveState(); renderActiveConversation(); } }
+    dom.promptSelector.addEventListener('change', () => { const activeConvo = state.conversations.find(c => c.id === state.activeConversationId); if (activeConvo) { activeConvo.promptId = dom.promptSelector.value; saveState(); renderActiveConversation(); } });
+
+    async function handleFormSubmit(event) {
+        if (event) event.preventDefault();
+        const userPrompt = dom.promptInput.value.trim();
+        if (!userPrompt || dom.sendBtn.disabled) return;
+        dom.promptInput.value = '';
+        dom.promptInput.style.height = 'auto';
+        dom.sendBtn.disabled = true;
+        const activeConvo = state.conversations.find(c => c.id === state.activeConversationId);
+        if (!activeConvo) { dom.sendBtn.disabled = false; return; }
+        if(activeConvo.messages.length === 0) {
+            activeConvo.title = userPrompt.substring(0, 30);
+            renderHistoryList();
+        }
+        activeConvo.messages.push({ role: 'user', content: userPrompt });
+        const pairContainer = createMessagePairContainer(activeConvo.messages.length - 1);
+        addMessageToContainer(userPrompt, 'user', pairContainer, activeConvo.messages.length - 1);
+        dom.chatContainer.appendChild(pairContainer);
+        scrollToBottom();
+        const { apiUrl, modelName, systemPrompt, apiKey } = resolveModelInfo(activeConvo.promptId);
+        if (!apiUrl || !modelName || !apiKey) {
+            const aiDiv = addMessageToContainer('', 'assistant', pairContainer, activeConvo.messages.length);
+            aiDiv.innerHTML = `错误：${!apiKey ? 'API Key 为空' : 'API或模型配置不正确'}，请检查设置。`;
+            dom.sendBtn.disabled = false;
+            return;
+        }
+        const aiMessageDiv = addMessageToContainer('', 'assistant', pairContainer, activeConvo.messages.length);
+        scrollToBottom();
+        let fullResponse = "";
+        try {
+            abortController = new AbortController();
+            const messagesForApi = activeConvo.messages.map(m => ({ role: m.role === 'ai' ? 'assistant' : m.role, content: m.content }));
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                body: JSON.stringify({ model: modelName, messages: [ { role: 'system', content: systemPrompt }, ...messagesForApi ], stream: true }),
+                signal: abortController.signal
+            });
+            if (!response.ok) throw new Error(`API Error: ${response.status} ${response.statusText}`);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n\n');
+                lines.forEach(line => {
+                    if (line.startsWith('data: ')) {
+                        const dataStr = line.substring(6);
+                        if (dataStr.trim() === '[DONE]') return;
+                        try {
+                            const data = JSON.parse(dataStr);
+                            const delta = data.choices[0]?.delta?.content;
+                            if (delta) { fullResponse += delta; aiMessageDiv.innerHTML = formatMessage(fullResponse); scrollToBottom(); }
+                        } catch(e) {}
+                    }
+                });
+            }
+        } catch (error) {
+            if (error.name !== 'AbortError') aiMessageDiv.innerHTML += `<br><br><strong>出错了:</strong> ${error.message}`;
+        } finally {
+            if (fullResponse) {
+                activeConvo.messages.push({ role: 'assistant', content: fullResponse });
+                saveState();
+                aiMessageDiv.dataset.index = activeConvo.messages.length - 1;
+                addEditingToMessage(aiMessageDiv, activeConvo.messages.length - 1);
+                speakText(fullResponse);
+            }
+            dom.sendBtn.disabled = false;
+        }
+    }
+
+    function openSettingsModal() { renderSettingsUI(); dom.settingsModal.style.display = 'flex'; }
+    function closeSettingsModal() { dom.settingsModal.style.display = 'none'; }
+
+    function renderSettingsUI() {
+        dom.soundEnabledCheckbox.checked = state.settings.soundEnabled;
+        const allModels = [];
+        state.settings.apiConfigs.forEach(api => {
+            const apiName = api.name.trim();
+            if (apiName && api.models) {
+                api.models.split(',').forEach(pair => {
+                    const [alias, modelName] = pair.split(':').map(s => s.trim());
+                    if (alias && modelName) { allModels.push({ text: `${apiName}: ${alias}`, value: `${apiName}:${alias}` }); }
+                });
+            }
+        });
+        dom.apiConfigsContainer.innerHTML = '';
+        dom.systemPromptsContainer.innerHTML = '';
+        state.settings.apiConfigs.forEach(c => addApiConfigToUI(c));
+        state.settings.systemPrompts.forEach(p => addSystemPromptToUI(p, allModels));
+    }
+
+    function saveSettingsFromUI() {
+        state.settings.soundEnabled = dom.soundEnabledCheckbox.checked;
+        const newApiConfigs = [];
+        dom.apiConfigsContainer.querySelectorAll('.item-card').forEach(card => newApiConfigs.push({ id: card.dataset.id, name: card.querySelector('.config-name').value.trim(), url: card.querySelector('.config-url').value.trim(), apiKey: card.querySelector('.config-key').value, models: card.querySelector('.config-models').value.trim() }));
+        state.settings.apiConfigs = newApiConfigs;
+        const newSystemPrompts = [];
+        dom.systemPromptsContainer.querySelectorAll('.item-card').forEach(card => newSystemPrompts.push({ id: card.dataset.id, name: card.querySelector('.prompt-name').value.trim(), model: card.querySelector('.prompt-model').value, content: card.querySelector('.prompt-content').value.trim(), hint: card.querySelector('.prompt-hint').value.trim() }));
+        state.settings.systemPrompts = newSystemPrompts;
+        saveState(); renderAll(); closeSettingsModal();
+    }
+
+    function addApiConfigToUI(config = {}) {
+        const card = dom.apiConfigTemplate.content.cloneNode(true);
+        const cardEl = card.querySelector('.item-card');
+        cardEl.dataset.id = config.id || `api-${Date.now()}`;
+        cardEl.querySelector('.config-name').value = config.name || '';
+        cardEl.querySelector('.config-url').value = config.url || '';
+        cardEl.querySelector('.config-key').value = config.apiKey || '';
+        cardEl.querySelector('.config-models').value = config.models || '';
+        cardEl.querySelector('.delete-btn').onclick = () => { cardEl.remove(); renderSettingsUI(); };
+        dom.apiConfigsContainer.appendChild(card);
+    }
+    
+    // --- NEW HELPER FUNCTION: Auto-resize Textarea ---
+    function autoResizeTextarea(textarea) {
+        textarea.style.height = 'auto'; // Reset height to shrink if needed
+        textarea.style.height = (textarea.scrollHeight) + 'px'; // Set height to content height
+    }
+
+    // --- MODIFIED FUNCTION for Auto-Resizing Textarea ---
+    function addSystemPromptToUI(prompt = {}, allModels = []) {
+        const card = dom.systemPromptTemplate.content.cloneNode(true);
+        const cardEl = card.querySelector('.item-card');
+        cardEl.dataset.id = prompt.id || `prompt-${Date.now()}`;
+        cardEl.querySelector('.prompt-name').value = prompt.name || '';
+        
+        // Get references to textareas
+        const contentTextarea = cardEl.querySelector('.prompt-content');
+        const hintTextarea = cardEl.querySelector('.prompt-hint');
+
+        // Set their values
+        contentTextarea.value = prompt.content || '';
+        hintTextarea.value = prompt.hint || '';
+
+        // Add event listeners for real-time resizing on user input
+        contentTextarea.addEventListener('input', () => autoResizeTextarea(contentTextarea));
+        hintTextarea.addEventListener('input', () => autoResizeTextarea(hintTextarea));
+        
+        // Perform the initial resize after the element is added to the DOM
+        // setTimeout is a trick to ensure scrollHeight is calculated correctly after render
+        setTimeout(() => {
+            autoResizeTextarea(contentTextarea);
+            autoResizeTextarea(hintTextarea);
+        }, 0);
+
+        cardEl.querySelector('.delete-btn').onclick = () => cardEl.remove();
+        const select = cardEl.querySelector('.prompt-model');
+        select.innerHTML = '<option value="">-- 选择模型 --</option>';
+        allModels.forEach(m => select.add(new Option(m.text, m.value)));
+        select.value = prompt.model || '';
+        dom.systemPromptsContainer.appendChild(card);
+    }
+    
+    // --- Utility Functions ---
+    function resolveModelInfo(promptId) { const prompt = state.settings.systemPrompts.find(p => p.id === promptId); if (!prompt || !prompt.model) return {}; const [apiAlias, modelAlias] = prompt.model.split(':'); const apiConfig = state.settings.apiConfigs.find(c => c.name === apiAlias); if (!apiConfig) return {}; const models = parseModels(apiConfig.models); const modelName = models[modelAlias]; return { apiUrl: apiConfig.url, modelName, systemPrompt: prompt.content, apiKey: apiConfig.apiKey }; }
+    function parseModels(modelsStr) { const m = {}; (modelsStr || '').split(',').forEach(p => { const [a, n] = p.split(':').map(s => s.trim()); if (a && n) m[a] = n; }); return m; }
+    function formatMessage(text) { return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>').replace(/\n/g, '<br>'); }
+    function scrollToBottom() { dom.chatContainer.scrollTop = dom.chatContainer.scrollHeight; }
+
+    function speakText(text) {
+        if (!state.settings.soundEnabled) return;
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = formatMessage(text);
+        const cleanText = tempDiv.textContent || tempDiv.innerText || '';
+        const u = new SpeechSynthesisUtterance(cleanText);
+        u.lang = 'zh-CN';
+        u.rate = 1.1;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+    }
+    
+    function addMessageToContainer(text, sender, parent, index) {
+        const el = document.createElement('div');
+        el.className = `message ${sender === 'user' ? 'user-message' : 'ai-message'}`;
+        el.innerHTML = formatMessage(text);
+        el.dataset.index = index;
+        addEditingToMessage(el, index);
+        parent.appendChild(el);
+        return el;
+    }
+
+    function addEditingToMessage(element, index) {
+        element.setAttribute('contenteditable', 'true');
+        element.setAttribute('spellcheck', 'false');
+        element.addEventListener('blur', (e) => {
+            const activeConvo = state.conversations.find(c => c.id === state.activeConversationId);
+            if (activeConvo && activeConvo.messages[index]) {
+                const newContent = e.target.innerHTML.replace(/<br\s*\/?>/gi, '\n');
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = newContent;
+                const cleanContent = tempDiv.textContent || tempDiv.innerText;
+                if (cleanContent !== activeConvo.messages[index].content) {
+                    activeConvo.messages[index].content = cleanContent;
+                    saveState();
+                }
+                e.target.innerHTML = formatMessage(activeConvo.messages[index].content);
+            }
+        });
+        element.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                e.target.blur();
+            }
+        })
+    }
+
+    // --- Event Listeners ---
+    dom.historyToggleBtn.addEventListener('click', () => dom.historyPanel.classList.toggle('open'));
+    dom.newChatBtn.addEventListener('click', handleNewConversation);
+    dom.settingsBtn.addEventListener('click', openSettingsModal);
+    dom.closeBtn.addEventListener('click', closeSettingsModal);
+    dom.saveSettingsBtn.addEventListener('click', saveSettingsFromUI);
+    dom.addApiBtn.addEventListener('click', () => { addApiConfigToUI(); renderSettingsUI(); });
+    dom.addPromptBtn.addEventListener('click', () => { addSystemPromptToUI({}, []); renderSettingsUI(); });
+    dom.inputForm.addEventListener('submit', handleFormSubmit);
+    dom.promptInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleFormSubmit();
+        }
+    });
+    dom.promptInput.addEventListener('input', () => {
+        dom.promptInput.style.height = 'auto';
+        dom.promptInput.style.height = (dom.promptInput.scrollHeight) + 'px';
+    });
+
+    // --- Initial Load ---
+    loadState();
+    renderAll();
+});
+</script>
+</body>
+</html>

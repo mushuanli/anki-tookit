@@ -1,0 +1,56 @@
+# -------------------------------------------------------------------
+# AI-CLI-RS 主配置文件 (支持多类型AI服务商)
+# -------------------------------------------------------------------
+
+server:
+  # 'servers' 是一个映射，键是你在客户端看到的服务器名称（如 "deepseek"），
+  # 值是该服务器的具体配置。
+  servers:
+    # 第一个AI服务提供商的配置
+    deepseek:
+      type: "openai" # 指定此服务的API类型 (兼容OpenAI)
+      url: "https://api.deepseek.com/v1/chat/completions"
+      token: "sk-your-deepseek-api-key-here" # <<< 替换为你的 DeepSeek API Key
+      model_list:
+        chat: "deepseek-chat"
+        reasoner: "deepseek-reasoner"
+      default_model: "chat"
+
+    # 第二个AI服务提供商的示例配置 (例如，一个兼容OpenAI的本地模型服务)
+    local-llama:
+      type: "openai" # 本地Ollama也暴露了兼容OpenAI的API
+      url: "http://localhost:11434/v1/chat/completions"
+      token: "not-needed-for-local"
+      model_list:
+        llama3-8b: "llama3"
+        mistral: "mistral"
+      default_model: "llama3-8b"
+      
+    # 未来可能添加的其他类型服务，例如Google Gemini
+    # gemini-pro:
+    #   type: "gemini" 
+    #   token: "your-google-api-key-here"
+    #   model_list:
+    #     "gemini-1.5": "gemini-1.5-pro-latest"
+    #   default_model: "gemini-1.5"
+  
+  # 'default' 字段指定了整个应用的默认模型。
+  # 格式: "server_name:display_name"
+  default: "deepseek:chat"
+
+  # TLS配置
+  ssl_cert: "data/cert.pem"
+  ssl_key: "data/key.pem"
+
+# 数据库配置
+database:
+  path: "data/chat_main.db"
+
+# 文件存储配置
+storage:
+  chat_dir: "data/chats"
+  attachment_dir: "data/attachments"
+
+# 可选的并发控制
+concurrency:
+  max_concurrent_tasks: 5

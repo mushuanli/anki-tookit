@@ -1,0 +1,30 @@
+# API and service configuration
+[api]
+openai_base_url = "https://api.deepseek.com"
+openai_model = "deepseek-chat"
+# It is recommended to use environment variables for keys.
+# Export with: export OPENAI_API_KEY="your_key"
+openai_api_key = "" 
+
+flux_api_gen_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+flux_api_query_url = "https://dashscope.aliyuncs.com/api/v1/tasks/"
+flux_api_model = "flux-schnell"
+# It is recommended to use environment variables for keys.
+# Export with: export FLUX_API_KEY="your_key"
+flux_api_key = ""
+
+# Path configuration relative to the output directory
+[paths]
+audio_dir = "audio"
+image_dir = "images"
+json_dir = "json"
+media_dir = "media" # anki packaging media folder
+
+# Generation parameters
+[generation]
+image_gen_delay_ms = 5000 # Initial delay after submitting image generation task
+image_query_poll_interval_ms = 10000 # Polling interval to check image generation status
+image_query_timeout_ms = 120000 # Total timeout for image generation
+
+# macOS 'say' command parameters. E.g., for a different voice: "-v Ting-Ting"
+audio_param_mac = ""

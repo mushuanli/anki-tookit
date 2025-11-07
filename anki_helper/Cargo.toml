@@ -1,0 +1,26 @@
+[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# --- 修改下面这一行 ---
+genanki-rs = "0.4.0" 
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5.4", features = ["derive"] }
+glob = "0.3.1"
+anyhow = "1.0.86"
+rand = "0.8.5"
+
+tokio = { version = "1", features = ["full"] } # 异步运行时
+tokio-stream = "0.1"
+reqwest = { version = "0.12", features = ["json"] } # HTTP 客户端
+dotenvy = "0.15" # 用于加载 .env 文件中的环境变量
+futures = "0.3"
+
+zip = "0.6"
+rusqlite = { version = "0.25.4", features = ["bundled"] }
+tempfile = "3.8"
+zstd = "0.13.1"
