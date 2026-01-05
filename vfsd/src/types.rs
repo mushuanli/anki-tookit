@@ -9,6 +9,8 @@ pub const JWT_SECRET: &[u8] = b"your_super_secret_jwt_key_change_me_in_productio
 pub const DEFAULT_QUOTA_BYTES: i64 = 1024 * 1024 * 1024; // 1 GB default quota
 pub const MAX_UPLOAD_MB: usize = 100; // Max upload size per request
 
+pub type RequestUserId = Option<i64>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Pool<Sqlite>,

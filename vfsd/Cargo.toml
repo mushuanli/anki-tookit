@@ -28,3 +28,4 @@ ratatui = "0.26"
 crossterm = "0.27"
 daemonize = "0.5"
 arboard = "3.4"
+time = "0.3"  # 新增：rcgen 需要

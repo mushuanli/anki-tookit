@@ -9,11 +9,7 @@ use sqlx::Row;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use ipnetwork::IpNetwork;
-use crate::types::{AppState, Claims, JWT_SECRET};
-
-// 定义一个简单的类型，用于将 User ID 存入 request extensions
-// NOTE: 实际应用中，可以考虑使用一个更完整的结构体来存储认证信息
-type RequestUserId = Option<i64>;
+use crate::types::{AppState, Claims, JWT_SECRET,RequestUserId};
 
 // IP 检查辅助函数
 async fn check_ip_allowed(db: &sqlx::Pool<sqlx::Sqlite>, user_id: i64, user_ip: std::net::IpAddr) -> bool {

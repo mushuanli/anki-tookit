@@ -9,11 +9,11 @@ use daemonize::Daemonize;
 use dashmap::DashMap;
 use ipnetwork::IpNetwork;
 use rand::{distributions::Alphanumeric, Rng};
-use rcgen::generate_simple_self_signed;
 use sqlx::{Pool, Row, Sqlite};
 use std::{
     fs::{self, File},
     sync::Arc,
+    net::IpAddr,
 };
 use bcrypt::{hash, DEFAULT_COST};
 use sha2::{Digest, Sha256};
@@ -45,7 +45,25 @@ enum Commands {
         daemon: bool, 
     },
     /// Generate self-signed certs for testing
-    GenCert,
+    GenCert {
+        /// Additional IP addresses to include in the certificate (can be used multiple times)
+        /// Example: --ip 192.168.1.100 --ip 10.0.0.1
+        #[arg(long, short = 'i')]
+        ip: Vec<String>,
+        
+        /// Additional domain names to include in the certificate (can be used multiple times)
+        /// Example: --domain example.com --domain api.example.com
+        #[arg(long, short = 'd')]
+        domain: Vec<String>,
+        
+        /// Output certificate file path
+        #[arg(long, default_value = "cert.pem")]
+        cert_out: String,
+        
+        /// Output private key file path
+        #[arg(long, default_value = "key.pem")]
+        key_out: String,
+    },
     User {
         #[command(subcommand)]
         action: UserAction,
@@ -123,12 +141,8 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
     // GenCert Helper (No DB needed)
-    if let Some(Commands::GenCert) = cli.command {
-        let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        let cert = generate_simple_self_signed(subject_alt_names).unwrap();
-        fs::write("cert.pem", cert.serialize_pem()?)?;
-        fs::write("key.pem", cert.serialize_private_key_pem())?;
-        println!("Generated cert.pem and key.pem");
+    if let Some(Commands::GenCert { ip, domain, cert_out, key_out }) = cli.command {
+        generate_certificate(ip, domain, cert_out, key_out)?;
         return Ok(());
     }
 
@@ -146,11 +160,76 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Status) => handle_status_cli(&pool).await?,
         Some(Commands::Tui) => start_tui(pool).await?,
         Some(Commands::Serve { cert, key, port, .. }) => run_server(state, cert, key, port).await?,
-        // 修复: 匹配分支返回类型不一致。这里应该返回 ()，因为上面用了 await? 解包后的结果是 ()
-        Some(Commands::GenCert) => {}, 
+        Some(Commands::GenCert { .. }) => {}, // Already handled above
         None => run_server(state, "cert.pem".to_string(), "key.pem".to_string(), 3443).await?,
     }
 
+    Ok(())
+}
+
+/// Generate a self-signed TLS certificate with custom SANs
+fn generate_certificate(
+    ips: Vec<String>, 
+    domains: Vec<String>, 
+    cert_out: String, 
+    key_out: String
+) -> anyhow::Result<()> {
+    use rcgen::generate_simple_self_signed;
+    
+    // Build Subject Alternative Names as strings
+    let mut subject_alt_names: Vec<String> = Vec::new();
+    
+    // Always include localhost and 127.0.0.1 by default
+    subject_alt_names.push("localhost".to_string());
+    subject_alt_names.push("127.0.0.1".to_string());
+    
+    println!("Generating self-signed certificate...");
+    println!("Subject Alternative Names (SANs):");
+    println!("  - localhost (default)");
+    println!("  - 127.0.0.1 (default)");
+    
+    // Add user-provided IP addresses
+    for ip_str in &ips {
+        // Validate IP format
+        if ip_str.parse::<IpAddr>().is_ok() {
+            if !subject_alt_names.contains(ip_str) {
+                subject_alt_names.push(ip_str.clone());
+                println!("  - {} (IP)", ip_str);
+            }
+        } else {
+            eprintln!("  Warning: Invalid IP address '{}', skipping", ip_str);
+        }
+    }
+    
+    // Add user-provided domain names
+    for domain in &domains {
+        if !domain.is_empty() && !subject_alt_names.contains(domain) {
+            subject_alt_names.push(domain.clone());
+            println!("  - {} (Domain)", domain);
+        }
+    }
+    
+    // Generate certificate
+    let cert = generate_simple_self_signed(subject_alt_names)
+        .map_err(|e| anyhow::anyhow!("Failed to generate certificate: {}", e))?;
+    
+    // Write files
+    fs::write(&cert_out, cert.serialize_pem()?)?;
+    fs::write(&key_out, cert.serialize_private_key_pem())?;
+    
+    println!("\nCertificate generated successfully!");
+    println!("  Certificate: {}", cert_out);
+    println!("  Private Key: {}", key_out);
+    println!("  Valid for:   ~30 days (default)");
+    println!("\nUsage examples:");
+    println!("  ./vfs-server serve");
+    println!("  ./vfs-server serve --cert {} --key {}", cert_out, key_out);
+    
+    if ips.is_empty() && domains.is_empty() {
+        println!("\nTip: For remote access, generate with your server IP/domain:");
+        println!("  ./vfs-server gen-cert --ip 192.168.1.100 --domain example.com");
+    }
+    
     Ok(())
 }
 
@@ -167,17 +246,14 @@ async fn handle_user_cli(action: UserAction, pool: &Pool<Sqlite>) -> anyhow::Res
                 println!("{:<5} | {:<20} | {:.2}", row.get::<i64, _>("id"), row.get::<String, _>("username"), q as f64 / 1024.0 / 1024.0);
             }
         }
-        // 修改: 不再接受密码，自动生成随机哈希禁用密码登录，并自动生成 TOKEN
         UserAction::Add { username } => {
-            // 生成一个随机密码哈希，实际上是禁用密码登录
             let rng_pass: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
-                .take(32) // 足够长的随机字符串
+                .take(32)
                 .map(char::from)
                 .collect();
             let hash = hash(rng_pass, DEFAULT_COST)?;
 
-            // 插入用户
             let res = sqlx::query("INSERT INTO users (username, password_hash, quota_bytes) VALUES (?, ?, ?)")
                 .bind(&username).bind(hash).bind(DEFAULT_QUOTA_BYTES).execute(pool).await;
 
@@ -272,26 +348,21 @@ async fn handle_token_cli(action: TokenAction, pool: &Pool<Sqlite>) -> anyhow::R
                 let rng = rand::thread_rng();
                 let random_part: String = rng.sample_iter(&Alphanumeric).take(48).map(char::from).collect();
                 let token = format!("sk-{}", random_part);
-                // Hash the actual token for storage
                 let hash_str = hex::encode(Sha256::digest(token.as_bytes()));
-                let prefix = &token[0..10]; // First 10 chars for prefix
+                let prefix = &token[0..10];
                 let uid: i64 = u.get("id");
                 
-                // Phase 1: 写入 Scope 和 Perm
                 let perm = if ro { "ro" } else { "rw" };
-                
-                // Ensure scope starts with /
                 let validated_scope = if scope.starts_with('/') { scope } else { format!("/{}", scope) };
 
-                // 修正：validated_scope 使用引用绑定，避免 Move
                 sqlx::query("INSERT INTO api_keys (user_id, note, prefix, key_hash, created_at, scope_path, permission) VALUES (?, ?, ?, ?, ?, ?, ?)")
                     .bind(uid).bind(&note).bind(prefix).bind(hash_str)
                     .bind(chrono::Utc::now().timestamp())
-                    .bind(&validated_scope).bind(perm) // 修正
+                    .bind(&validated_scope).bind(perm)
                     .execute(pool).await?;
                 
                 println!("Token: {}", token);
-                println!("Scope: {}", validated_scope); // 修正
+                println!("Scope: {}", validated_scope);
                 println!("Keep it safe!");
             } else { println!("User not found."); }
         }
@@ -316,7 +387,7 @@ async fn handle_ip_cli(action: IpAction, pool: &Pool<Sqlite>) -> anyhow::Result<
                  let ips = sqlx::query("SELECT ip_cidr FROM user_ips WHERE user_id = ?").bind(uid).fetch_all(pool).await?;
                  println!("IP Whitelist for user '{}':", username);
                  if ips.is_empty() {
-                     println!("  (No IPs whitelisted)");
+                     println!("  (No IPs whitelisted - all IPs allowed)");
                  } else {
                      for ip_row in ips { println!(" - {}", ip_row.get::<String, _>("ip_cidr")); }
                  }
@@ -339,9 +410,8 @@ async fn handle_ip_cli(action: IpAction, pool: &Pool<Sqlite>) -> anyhow::Result<
             let row = sqlx::query("SELECT id FROM users WHERE username = ?").bind(&username).fetch_optional(pool).await?;
             if let Some(r) = row {
                 let uid = r.get::<i64, _>("id");
-                // 修正：cidr 使用引用绑定
                 sqlx::query("DELETE FROM user_ips WHERE user_id = ? AND ip_cidr = ?").bind(uid).bind(&cidr).execute(pool).await?;
-                println!("IP '{}' removed.", cidr); // 修正
+                println!("IP '{}' removed.", cidr);
             }
         }
     }
@@ -353,7 +423,6 @@ async fn handle_status_cli(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     let t: i64 = sqlx::query("SELECT COUNT(*) as c FROM api_keys").fetch_one(pool).await?.get("c");
     let f: i64 = sqlx::query("SELECT COUNT(*) as c FROM files").fetch_one(pool).await?.get("c");
     
-    // 修正：处理 SQL 结果类型，显式指定 Option<i64>
     let size_res: Option<i64> = sqlx::query("SELECT SUM(LENGTH(content)) as size FROM files")
         .fetch_one(pool).await?
         .try_get::<Option<i64>, _>("size")?;

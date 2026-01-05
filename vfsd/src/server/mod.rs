@@ -16,9 +16,6 @@ use crate::types::{AppState, MAX_UPLOAD_MB};
 use handlers::*;
 use logger::access_log_middleware;
 
-// Add user_id extension type here for logger middleware
-type RequestUserId = Option<i64>; // Must match the type used in logger.rs and auth.rs
-
 pub async fn run_server(state: Arc<AppState>, cert: String, key: String, port: u16) -> anyhow::Result<()> {
     if !Path::new(&cert).exists() || !Path::new(&key).exists() {
         // Check for default certs first, then error out if missing

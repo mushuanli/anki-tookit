@@ -10,8 +10,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use crate::types::{AppState};
 
-type RequestUserId = Option<i64>;
-
 pub async fn access_log_middleware(
     State(state): State<Arc<AppState>>,
     connect_info: ConnectInfo<SocketAddr>,
