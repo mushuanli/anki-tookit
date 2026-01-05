@@ -14,6 +14,8 @@ use std::{
     fs::{self, File},
     sync::Arc,
     net::IpAddr,
+    path::Path, // 新增引用
+    process::Command as ShellCommand, // 新增引用，用于执行 kill
 };
 use bcrypt::{hash, DEFAULT_COST};
 use sha2::{Digest, Sha256};
@@ -44,6 +46,9 @@ enum Commands {
         #[arg(short, long)]
         daemon: bool, 
     },
+    /// Stop the background server (Daemon mode)
+    /// Reads PID from vfs-server.pid and sends SIGTERM
+    Stop, // --- 新增 Stop 命令 ---
     /// Generate self-signed certs for testing
     GenCert {
         /// Additional IP addresses to include in the certificate (can be used multiple times)
@@ -145,6 +150,13 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         generate_certificate(ip, domain, cert_out, key_out)?;
         return Ok(());
     }
+    
+    // Stop Helper (No DB needed)
+    // --- 新增 Stop 处理逻辑 ---
+    if let Some(Commands::Stop) = cli.command {
+        stop_daemon()?;
+        return Ok(());
+    }
 
     // DB Init
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:sync.db".to_string());
@@ -161,7 +173,52 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Tui) => start_tui(pool).await?,
         Some(Commands::Serve { cert, key, port, .. }) => run_server(state, cert, key, port).await?,
         Some(Commands::GenCert { .. }) => {}, // Already handled above
+        Some(Commands::Stop) => {},           // Already handled above
         None => run_server(state, "cert.pem".to_string(), "key.pem".to_string(), 3443).await?,
+    }
+
+    Ok(())
+}
+
+// --- 新增 Stop 实现函数 ---
+fn stop_daemon() -> anyhow::Result<()> {
+    let pid_file = "vfs-server.pid";
+    
+    if !Path::new(pid_file).exists() {
+        println!("No running daemon found ({} missing).", pid_file);
+        return Ok(());
+    }
+
+    let pid_str = fs::read_to_string(pid_file)?;
+    let pid = pid_str.trim().parse::<i32>()?;
+
+    println!("Stopping server (PID: {})...", pid);
+
+    // 使用系统 kill 命令发送 SIGTERM (15)
+    // 这比引入 libc crate 更轻量，且 daemonize 本身就意味着是 Unix 环境
+    #[cfg(unix)]
+    {
+        let status = ShellCommand::new("kill")
+            .arg(pid.to_string())
+            .status()?;
+
+        if status.success() {
+            println!("Server stopped successfully.");
+            // 尝试清理 PID 文件
+            if let Err(e) = fs::remove_file(pid_file) {
+                eprintln!("Warning: Failed to remove PID file: {}", e);
+            }
+        } else {
+            eprintln!("Failed to stop server. Process might not exist or permission denied.");
+            // 如果进程不存在了，询问是否删除 PID 文件
+            eprintln!("Removing stale PID file.");
+            let _ = fs::remove_file(pid_file);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        println!("Stop command is currently only supported on Unix-like systems.");
     }
 
     Ok(())
