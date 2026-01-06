@@ -8,7 +8,7 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::types::{AppState};
+use crate::types::{AppState, RequestUserId}; // 引入 RequestUserId
 
 pub async fn access_log_middleware(
     State(state): State<Arc<AppState>>,
@@ -21,26 +21,35 @@ pub async fn access_log_middleware(
     let path = req.uri().path().to_string();
     let remote_ip = connect_info.0.ip().to_string();
 
-    // 逻辑修正：目前架构下，这里拿不到 Extractor 注入的 ID，因为 Extractor 还没跑。
-    // 但为了修复编译/类型逻辑：
-    // let user_id = req.extensions().get::<RequestUserId>().cloned().unwrap_or(None);
-    let user_id: Option<i64> = None; 
-
-    // Run the inner handler
+    // 运行 Handler
     let response = next.run(req).await;
     
     let latency_ms = start.elapsed().as_millis() as i64;
     let status = response.status().as_u16();
 
-    // Try to extract user_id from response extensions (if handlers inserted it)
-    // Or from request extensions (if extractor ran).
-    // 由于 Axum 的提取器顺序问题，我们通常无法在中间件 response 阶段直接拿到 extractor 的数据
-    // 除非我们在 Handler 里手动 insert 到 extensions。
-    // 为了简化，这里我们假设如果在 Handler 中验证成功，Claims 会被放在 request extensions 中。
-    // (注意：这需要 Claims 提取器实现中不仅返回 Claims，还要将其 insert 到 extensions 中，这在之前的代码中未做)
-    // *Phase 3 修正*：为了能记录 User ID，我们暂且记录为 0 (匿名) 或在后续优化 Auth 提取器。
+    // 尝试从 Response extensions 中获取 user_id
+    // 注意：Request Extensions 是传给 Handler 的，如果 Handler 成功运行，
+    // 它通常不会把 extensions 传给 Response。
+    // 但是，我们在 Auth 阶段插入的是 Request Extensions。
+    // 在 Axum 中，中间件在处理 response 时，拿到的是原始 req 的引用吗？
+    // `next.run(req)` 消耗了 req。所以我们无法再访问原始 req 的 extensions。
+    // 这是一个常见的 Axum 中间件难题。
+    // 
+    // 简单做法：我们在此处不强求获取 UserID，或者接受它可能为 None。
+    // 如果需要 UserID，必须使用 `map_request` 和 `map_response` 组合，或者使用 Handle 把数据塞进 Response extensions。
+    // 鉴于目前的复杂度，我们依然记录 None，但在 Log 文件中打印详细信息。
     
-    // 异步写入日志，不阻塞主线程
+    let user_id: RequestUserId = None; 
+
+    // --- 文件日志 (stdout -> vfs-server.log) ---
+    // 格式: [Timestamp] IP METHOD PATH STATUS Latency
+    println!(
+        "[{}] {} {} {} {} {}ms", 
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
+        remote_ip, method, path, status, latency_ms
+    );
+
+    // --- 数据库日志 (用于 TUI) ---
     let db = state.db.clone();
     tokio::spawn(async move {
         let _ = sqlx::query("INSERT INTO access_logs (timestamp, remote_ip, method, path, status, user_id, latency_ms) VALUES (?, ?, ?, ?, ?, ?, ?)")

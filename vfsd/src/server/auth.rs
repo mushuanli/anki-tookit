@@ -28,12 +28,12 @@ async fn check_ip_allowed(db: &sqlx::Pool<sqlx::Sqlite>, user_id: i64, user_ip: 
         let cidr: String = row.get("ip_cidr");
         if let Ok(net) = cidr.parse::<IpNetwork>() {
             if net.contains(user_ip) { return true; }
-        } else {
-            // Log invalid CIDR if needed
-            eprintln!("Warning: Invalid CIDR format in DB for user {}: {}", user_id, cidr);
         }
     }
-    false // IP not found in whitelist
+    
+    // Log failure
+    eprintln!("[Auth] IP blocked: User {} from IP {} is not in whitelist.", user_id, user_ip);
+    false 
 }
 
 #[axum::async_trait]
@@ -41,36 +41,44 @@ impl FromRequestParts<Arc<AppState>> for Claims {
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+        let connect_info = parts.extensions.get::<ConnectInfo<SocketAddr>>()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let ip = connect_info.0.ip();
+
         // 1. Extract Token
         let header = parts.headers.get("Authorization")
             .and_then(|v| v.to_str().ok())
             .ok_or(StatusCode::UNAUTHORIZED)?;
         
-        if !header.starts_with("Bearer ") { return Err(StatusCode::UNAUTHORIZED); }
-        let token = &header[7..];
-
-        let connect_info = parts.extensions.get::<ConnectInfo<SocketAddr>>()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        let ip = connect_info.0.ip();
+        if !header.starts_with("Bearer ") { 
+            eprintln!("[Auth] Failed: Missing 'Bearer' prefix from IP {}", ip);
+            return Err(StatusCode::UNAUTHORIZED); 
+        }
+        let token = &header[7..].trim(); // [修复] 再次 trim 以防万一
 
         // --- Logic A: API Key (sk-...) ---
         if token.starts_with("sk-") {
             // Hash the provided token to compare with stored hash
             let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
             
-            // Query for API key details, including user ID, username, scope, and permission
-let sql = "
-    SELECT u.id as uid, u.username, k.scope_path, k.permission 
-    FROM api_keys k 
-    JOIN users u ON k.user_id = u.id 
-    WHERE k.key_hash = ? AND (k.expires_at = 0 OR k.expires_at > ?)"; // <--- 添加括号
+            // Debug Log: 打印前几位方便调试 (不要打印完整 Token)
+            // println!("[Auth] Checking API Key: {}... Hash: {}", &token[0..10.min(token.len())], token_hash);
+
+            let sql = "
+                SELECT u.id as uid, u.username, k.scope_path, k.permission 
+                FROM api_keys k 
+                JOIN users u ON k.user_id = u.id 
+                WHERE k.key_hash = ? AND (k.expires_at = 0 OR k.expires_at > ?)";
             
             let row = sqlx::query(sql)
-                .bind(token_hash)
-                .bind(chrono::Utc::now().timestamp()) // For expires_at check
+                .bind(&token_hash) // 使用引用
+                .bind(chrono::Utc::now().timestamp())
                 .fetch_optional(&state.db)
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|e| {
+                    eprintln!("[Auth] DB Error: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
 
             if let Some(r) = row {
                 let uid: i64 = r.get("uid");
@@ -92,23 +100,24 @@ let sql = "
                     perm: r.get("permission"),
                 };
 
-                // Store user ID in extensions for the logger middleware
                 parts.extensions.insert(RequestUserId::Some(claims.uid));
-
                 return Ok(claims);
             } else {
-                // API Key not found or expired
+                eprintln!("[Auth] Failed: API Key not found or expired. IP: {}", ip);
+                // 提示：这通常是因为 Token 字符串有多余空格或 hash 计算不一致
                 return Err(StatusCode::UNAUTHORIZED);
             }
         }
 
         // --- Logic B: JWT (Web Login) ---
-        // Decode JWT
         let claims_result = decode::<Claims>(token, &DecodingKey::from_secret(JWT_SECRET), &Validation::default());
 
-        let claims = match claims_result { // 移除 mut，因为不需要修改
+        let claims = match claims_result {
             Ok(token_data) => token_data.claims,
-            Err(_) => return Err(StatusCode::UNAUTHORIZED),
+            Err(e) => {
+                eprintln!("[Auth] JWT Decode Failed: {} IP: {}", e, ip);
+                return Err(StatusCode::UNAUTHORIZED);
+            },
         };
 
         // IP Whitelist Check
@@ -124,16 +133,16 @@ let sql = "
             Ok(Some(r)) => {
                 let db_token_version: i32 = r.get("token_version");
                 if claims.ver != db_token_version {
-                    // Token version mismatch, session is invalidated
+                    eprintln!("[Auth] Token version mismatch (Revoked). User: {}", claims.sub);
                     return Err(StatusCode::UNAUTHORIZED);
                 }
             },
             Ok(None) => {
-                // User not found (shouldn't happen if token was valid, but check anyway)
+                eprintln!("[Auth] User not found for ID: {}", claims.uid);
                 return Err(StatusCode::FORBIDDEN);
             },
-            Err(_) => {
-                // Database error
+            Err(e) => {
+                eprintln!("[Auth] DB Error during JWT check: {}", e);
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
         }

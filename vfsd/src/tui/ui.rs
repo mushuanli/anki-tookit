@@ -184,17 +184,20 @@ fn draw_logs_tab(f: &mut Frame, app: &mut AppState, area: Rect) {
 
         // Display User ID if available
         let user_id_str = match log.user_id {
-            Some(uid) => format!("#{}", uid),
+            Some(uid) => format!("U#{}", uid),
             None => "-".to_string(),
         };
 
         let content = Line::from(vec![
+            // [修正] 添加了缺失的 '{'
+            Span::raw(format!("#{:<5} ", log.id)), 
+            
             Span::styled(format!(" {:<8} ", time_str), Style::default().fg(Color::DarkGray)),
             Span::styled(format!(" {:<4} ", log.method), Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(format!(" {:<3} ", log.status), status_style),
-            Span::raw(format!(" {:<30} ", log.path)),
+            Span::raw(format!(" {:<25} ", log.path)), 
             Span::styled(format!(" {:<15} ", log.ip), Style::default().fg(Color::Blue)),
-            Span::styled(format!(" {:<5} ", user_id_str), Style::default().fg(Color::Cyan)), // User ID
+            Span::styled(format!(" {:<6} ", user_id_str), Style::default().fg(Color::Cyan)), 
             Span::styled(format!(" {}ms", log.latency), Style::default().fg(Color::DarkGray)),
         ]);
         

@@ -43,13 +43,16 @@ pub async fn run_server(state: Arc<AppState>, cert: String, key: String, port: u
         .route("/api/sync/check", post(sync_check_handler))
         .route("/api/sync/upload", post(upload_handler))
         .route("/api/sync/download", post(download_handler))
-        // Apply the access log middleware. Pass state to it.
-        // We need to ensure the middleware can access the user_id from extensions.
-        // For this, the `auth` extractor needs to insert it.
-        .layer(middleware::from_fn_with_state(state.clone(), access_log_middleware)) 
-        .layer(CorsLayer::permissive()) // Enable CORS for all origins
-        .layer(RequestBodyLimitLayer::new(MAX_UPLOAD_MB * 1024 * 1024)) // Set request body limit
-        .with_state(state); // Share the AppState
+        
+        // Middleware Stack (执行顺序是 从下往上 / 从外向内)
+        // 1. CORS 必须在最外层，处理 OPTIONS 请求，不通过 Auth
+        .layer(CorsLayer::permissive()) 
+        // 2. BodyLimit
+        .layer(RequestBodyLimitLayer::new(MAX_UPLOAD_MB * 1024 * 1024))
+        // 3. 日志记录
+        .layer(middleware::from_fn_with_state(state.clone(), access_log_middleware))
+        
+        .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     
