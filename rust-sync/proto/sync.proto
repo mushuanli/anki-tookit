@@ -1,0 +1,78 @@
+// file: rustSync/proto/sync.proto
+syntax = "proto3";
+package sync;
+
+service SyncService {
+  // 登录获取 Token
+  rpc Login (LoginRequest) returns (LoginResponse);
+  
+  // 注册设备 (如果设备不存在)
+  rpc RegisterDevice (RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // 测试接口：查看当前 Token 的权限信息
+  rpc WhoAmI (Empty) returns (WhoAmIResponse);
+
+  // === 第二阶段新增 ===
+  // 客户端推送本地文件索引变更
+  rpc PushIndex (stream FileMeta) returns (PushIndexResponse);
+  
+  // 客户端拉取服务器端的文件索引
+  rpc PullIndex (PullIndexRequest) returns (stream FileMeta);
+}
+
+// === 通用消息 ===
+message Empty {}
+
+// === 认证相关消息 ===
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+  string device_id = 3; // 客户端生成的 UUID
+}
+
+message LoginResponse {
+  string token = 1;     // JWT
+  string user_id = 2;
+}
+
+message RegisterDeviceRequest {
+  string device_name = 1;
+  string device_id = 2;
+}
+
+message RegisterDeviceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message WhoAmIResponse {
+  string user_id = 1;
+  string device_id = 2;
+  string allowed_scope = 3;
+}
+
+// === 同步核心消息 (第二阶段新增) ===
+
+message ChunkInfo {
+  string hash = 1;
+  uint64 offset = 2;
+  uint32 length = 3;
+}
+
+message FileMeta {
+  string path = 1;            // 相对路径，如 "photos/a.jpg"
+  uint64 size = 2;
+  int64 mtime = 3;            // 修改时间戳
+  string file_hash = 4;       // 整个文件的 Hash
+  repeated ChunkInfo chunks = 5; // 分片信息列表
+  bool is_deleted = 6;
+}
+
+message PushIndexResponse {
+  int32 processed_count = 1;
+  bool success = 2;
+}
+
+message PullIndexRequest {
+  string prefix = 1; // 仅拉取特定目录，空代表所有
+}
