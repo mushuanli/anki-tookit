@@ -1,6 +1,7 @@
 // src/storage/cached_database.rs
 
 use std::sync::Arc;
+use std::ops::Deref; // 1. 引入 Deref
 use uuid::Uuid;
 
 use crate::error::AppResult;
@@ -14,17 +15,28 @@ pub struct CachedDatabase {
     cache: Arc<CacheService>,
 }
 
+// 2. 实现 Deref trait
+// 这样 CachedDatabase 就可以直接调用 Database 中所有不需要缓存拦截的方法
+// (例如: save_log, get_unresolved_conflicts, list_users 等)
+impl Deref for CachedDatabase {
+    type Target = Database;
+
+    fn deref(&self) -> &Self::Target {
+        &self.db
+    }
+}
+
 impl CachedDatabase {
     pub fn new(db: Database, cache: Arc<CacheService>) -> Self {
         Self { db, cache }
     }
 
-    /// 获取原始数据库连接（用于不需要缓存的操作）
+    /// 获取原始数据库连接（现在可以通过 Deref 自动获取，但保留此方法也可以）
     pub fn inner(&self) -> &Database {
         &self.db
     }
 
-    // ==================== 用户操作 ====================
+    // ==================== 需要缓存逻辑的覆盖方法 ====================
 
     pub async fn get_user_by_id(&self, id: Uuid) -> AppResult<Option<User>> {
         // 先查缓存
@@ -70,19 +82,29 @@ impl CachedDatabase {
     }
 
     pub async fn update_user(&self, user: &User) -> AppResult<()> {
-        // 先使缓存失效
+        // 先清理缓存
         self.cache.invalidate_user(
             Uuid::parse_str(&user.id).unwrap_or_default(),
             &user.username
         ).await;
         
-        // TODO: 实现 db.update_user
-        // self.db.update_user(user).await?;
+        // 调用底层更新
+        self.db.update_user(user).await?;
         
         Ok(())
     }
 
-    // ==================== Token 操作 ====================
+    // 3. 显式实现 delete_user 以处理缓存失效
+    pub async fn delete_user(&self, user_id: Uuid) -> AppResult<()> {
+        // 在删除前，先尝试获取用户信息以便清理用户名的缓存 key
+        // 如果获取不到说明可能已经不存在，或者不需要清理 username 缓存
+        if let Ok(Some(user)) = self.db.get_user_by_id(user_id).await {
+            self.cache.invalidate_user(user_id, &user.username).await;
+        }
+        
+        // 调用底层删除
+        self.db.delete_user(user_id).await
+    }
 
     pub async fn get_token_by_hash(&self, token_hash: &str) -> AppResult<Option<ApiToken>> {
         // 先查缓存

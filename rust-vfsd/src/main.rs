@@ -96,6 +96,11 @@ async fn run_server(config: Arc<Config>, db: Database) -> anyhow::Result<()> {
     // 初始化缓存服务
     let cache_service = Arc::new(CacheService::new(CacheServiceConfig::default()));
     tracing::info!("Cache service initialized");
+    // 核心数据库
+    let db = Database::new(&config.database).await?;
+    
+    // 包装为缓存数据库
+    let cached_db = crate::storage::CachedDatabase::new(db.clone(), cache_service.clone());
 
     // 初始化同步引擎（添加缓存参数）
     let sync_engine = Arc::new(
@@ -114,7 +119,7 @@ async fn run_server(config: Arc<Config>, db: Database) -> anyhow::Result<()> {
 
     // 创建应用状态
     let app_state = rest::AppState {
-        db: db.clone(),
+        db: cached_db.clone(), // 传入 cached_db
         file_store: file_store.clone(),
         sync_engine: sync_engine.clone(),
     };
@@ -127,7 +132,7 @@ async fn run_server(config: Arc<Config>, db: Database) -> anyhow::Result<()> {
     // 修改 AuthState，添加 db
     let auth_state = AuthState {
         jwt_service: Arc::new(JwtService::new(&config.auth)),
-        db: db.clone(),  // 添加这行
+        db: cached_db.clone(), // 修改 AuthState 定义中的 db 类型为 CachedDatabase
     };
 
     let rate_limit_state = RateLimitState {

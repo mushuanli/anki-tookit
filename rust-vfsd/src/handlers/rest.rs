@@ -13,7 +13,7 @@ use base64::Engine as _;
 use crate::auth::{Claims, PermissionChecker};
 use crate::error::{AppError, AppResult};
 use crate::models::*;
-use crate::storage::{Database, FileStore};
+use crate::storage::{CachedDatabase, FileStore}; // 改用 CachedDatabase
 use crate::sync::SyncEngine;
 use crate::utils::CryptoUtils;
 
@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Database,
+    pub db: CachedDatabase, // 这里从 Database 改为 CachedDatabase
     pub file_store: Arc<FileStore>,
     pub sync_engine: Arc<SyncEngine>,
 }

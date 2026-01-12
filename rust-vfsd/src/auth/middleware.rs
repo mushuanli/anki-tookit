@@ -9,14 +9,14 @@ use axum::{
 use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::Database;
+use crate::storage::CachedDatabase;
 use crate::utils::CryptoUtils;
 use super::jwt::{Claims, JwtService};
 
 #[derive(Clone)]
 pub struct AuthState {
     pub jwt_service: Arc<JwtService>,
-    pub db: Database,  // 添加数据库连接用于 API Token 验证
+    pub db: CachedDatabase,  // 添加数据库连接用于 API Token 验证
 }
 
 // 定义一个枚举来区分 Token 来源，以便复用验证逻辑

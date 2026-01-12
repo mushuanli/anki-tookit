@@ -55,6 +55,7 @@ async fn handle_socket(socket: WebSocket, claims: Claims, state: WsState) {
 
     let user_id = claims.sub;
     let device_id = claims.device_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let max_packet_size = state.config.sync.max_packet_size; // 从配置获取
 
     // 注册设备会话
     let _session = state
@@ -118,6 +119,7 @@ async fn handle_socket(socket: WebSocket, claims: Claims, state: WsState) {
                             &device_id,
                             &sync_engine,
                             &msg_tx,
+                            max_packet_size, // 传入
                         )
                         .await
                         {
@@ -188,7 +190,16 @@ async fn handle_text_message(
     device_id: &str,
     sync_engine: &SyncEngine,
     tx: &mpsc::Sender<OutgoingMessage>,
+    max_size: usize, // 新增参数
 ) -> AppResult<()> {
+    // 1. 检查大小
+    if text.len() > max_size {
+        return Err(AppError::ValidationError(format!(
+            "Message size exceeds limit: {} > {}", 
+            text.len(), max_size
+        )));
+    }
+
     let msg: WsMessage = serde_json::from_str(text)
         .map_err(|e| AppError::ValidationError(format!("Invalid message: {}", e)))?;
 

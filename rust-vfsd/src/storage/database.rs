@@ -262,6 +262,59 @@ impl Database {
         Ok(())
     }
 
+pub async fn list_users(&self, limit: i64, offset: i64, search: Option<&str>) -> AppResult<(Vec<User>, i64)> {
+    let search_term = search.map(|s| format!("%{}%", s));
+    
+    let count_query = "SELECT COUNT(*) FROM users WHERE (?1 IS NULL OR username LIKE ?1 OR display_name LIKE ?1)";
+    let count: (i64,) = sqlx::query_as(count_query)
+        .bind(search_term.clone())
+        .fetch_one(&self.pool)
+        .await?;
+
+    let list_query = r#"
+        SELECT * FROM users 
+        WHERE (?1 IS NULL OR username LIKE ?1 OR display_name LIKE ?1)
+        ORDER BY created_at DESC 
+        LIMIT ?2 OFFSET ?3
+    "#;
+    
+    let users = sqlx::query_as::<_, User>(list_query)
+        .bind(search_term)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+    Ok((users, count.0))
+}
+
+pub async fn update_user(&self, user: &User) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE users SET is_active = ?, storage_quota = ?, storage_used = ?, email = ?, display_name = ?, password_hash = ?, updated_at = ? WHERE id = ?"
+    )
+    .bind(user.is_active)
+    .bind(user.storage_quota)
+    .bind(user.storage_used)
+    .bind(&user.email)
+    .bind(&user.display_name)
+    .bind(&user.password_hash)
+    .bind(&user.updated_at)
+    .bind(&user.id)
+    .execute(&self.pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_user(&self, user_id: Uuid) -> AppResult<()> {
+    // 依赖外键 CASCADE 删除相关数据
+    sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(user_id.to_string())
+        .execute(&self.pool)
+        .await?;
+    Ok(())
+}
+
+
     // ==================== Token 相关 ====================
 
     pub async fn create_token(&self, token: &ApiToken) -> AppResult<()> {
@@ -336,6 +389,20 @@ impl Database {
     }
 
     // ==================== 同步日志相关 ====================
+pub async fn get_system_stats(&self) -> AppResult<crate::handlers::admin::SystemStats> {
+    let total_users: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users").fetch_one(&self.pool).await?;
+    let active_users: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_active = 1").fetch_one(&self.pool).await?;
+    let total_storage: (Option<i64>,) = sqlx::query_as("SELECT SUM(storage_used) FROM users").fetch_one(&self.pool).await?;
+    let total_logs: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sync_logs").fetch_one(&self.pool).await?;
+    
+    Ok(crate::handlers::admin::SystemStats {
+        total_users: total_users.0,
+        active_users: active_users.0,
+        total_storage_used: total_storage.0.unwrap_or(0),
+        total_sync_logs: total_logs.0,
+        active_connections: 0, // 这个数据需要在 Handler 层从 websocket state 获取，这里先填0
+    })
+}
 
     pub async fn save_log(&self, log: &SyncLog) -> AppResult<i64> {
         let metadata_json = log.metadata

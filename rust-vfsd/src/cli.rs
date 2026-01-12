@@ -1,6 +1,6 @@
 // src/cli.rs
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ Parser, Subcommand};
 use uuid::Uuid;
 use crate::storage::Database;
 use crate::utils::CryptoUtils;
@@ -105,8 +105,8 @@ impl CliHandler {
                 println!("用户列表功能需要在 Database 中实现 list_users 方法");
             }
             UserCommands::ResetPassword { username, password } => {
-                if let Some(mut user) = self.db.get_user_by_username(&username).await? {
-                    let new_hash = CryptoUtils::hash_password(&password)?;
+                if let Some(mut _user) = self.db.get_user_by_username(&username).await? {
+                    let _new_hash = CryptoUtils::hash_password(&password)?;
                     
                     // 这里需要在 Database 实现 update_password 方法
                     // 暂时模拟逻辑：
