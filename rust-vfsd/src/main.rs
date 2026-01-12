@@ -1,10 +1,6 @@
 // src/main.rs
 
-use axum::{
-    middleware,
-    routing::{delete, get, post},
-    Router,
-};
+use clap::Parser;
 use std::sync::Arc;
 use tower_http::{
     compression::CompressionLayer,
@@ -12,6 +8,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use axum::{middleware, routing::{delete, get, post}, Router};
 
 mod auth;
 mod config;
@@ -22,13 +19,18 @@ mod models;
 mod storage;
 mod sync;
 mod utils;
+mod cli; // 引入 CLI 模块
 
-use auth::{rate_limit::{RateLimitConfig, RateLimiter, RateLimitState, rate_limit_middleware}, AuthState, JwtService};
+use auth::{
+    rate_limit::{RateLimitConfig, RateLimiter, RateLimitState, rate_limit_middleware},
+    AuthState, JwtService,
+};
 use config::Config;
 use handlers::{admin, health, rest, websocket};
 use metrics::{init_metrics, metrics_handler, metrics_middleware};
-use storage::{cache::{CacheConfig, MemoryCache}, Database};
+use storage::{Database, FileStore, CacheService, CacheServiceConfig};
 use sync::SyncEngine;
+use cli::{Cli, Commands, CliHandler}; // 使用 CLI
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,17 +54,58 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting VFS Sync Server v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Server configuration: {}:{}", config.server.host, config.server.port);
+    tracing::info!("Database path: {}", config.database.path);
+    tracing::info!("Data directory: {:?}", config.storage.data_dir);
 
     // 初始化数据库
     let db = Database::new(&config.database).await?;
     db.run_migrations().await?;
-    tracing::info!("Database connected and migrations complete");
 
-    // 初始化缓存
-    let cache = Arc::new(MemoryCache::new(CacheConfig::default()));
+    // 4. 解析命令行参数
+    let cli = Cli::parse();
 
-    // 初始化同步引擎
-    let sync_engine = Arc::new(SyncEngine::new(db.clone(), config.clone()));
+    // 5. 根据命令分发
+    match cli.command {
+        // 如果是用户管理命令
+        Some(Commands::User(user_cmd)) => {
+            let handler = CliHandler::new(db);
+            handler.handle_user_command(user_cmd).await?;
+            return Ok(()); // 执行完命令后直接退出
+        }
+        
+        // 如果是 Server 或者没有输入命令 (默认)
+        Some(Commands::Server) | None => {
+            run_server(config, db).await?;
+        }
+    }
+
+    Ok(())
+}
+
+// 将原有的 Web 服务器启动逻辑抽取出来
+async fn run_server(config: Arc<Config>, db: Database) -> anyhow::Result<()> {
+    init_metrics();
+
+    tracing::info!("Starting VFS Sync Server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Server mode: Active");
+
+    // 初始化文件存储
+    let file_store = Arc::new(FileStore::new(&config.storage).await?);
+    tracing::info!("File store initialized");
+
+    // 初始化缓存服务
+    let cache_service = Arc::new(CacheService::new(CacheServiceConfig::default()));
+    tracing::info!("Cache service initialized");
+
+    // 初始化同步引擎（添加缓存参数）
+    let sync_engine = Arc::new(
+        SyncEngine::new(
+            db.clone(),
+            file_store.clone(),
+            cache_service.clone(),  // 添加这行
+            config.clone(),
+        ).await?
+    );
     tracing::info!("Sync engine initialized");
 
     // 初始化速率限制
@@ -72,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
     // 创建应用状态
     let app_state = rest::AppState {
         db: db.clone(),
+        file_store: file_store.clone(),
         sync_engine: sync_engine.clone(),
     };
 
@@ -80,8 +124,10 @@ async fn main() -> anyhow::Result<()> {
         sync_engine: sync_engine.clone(),
     };
 
+    // 修改 AuthState，添加 db
     let auth_state = AuthState {
         jwt_service: Arc::new(JwtService::new(&config.auth)),
+        db: db.clone(),  // 添加这行
     };
 
     let rate_limit_state = RateLimitState {
@@ -100,12 +146,12 @@ async fn main() -> anyhow::Result<()> {
             Router::new()
                 .route("/login", post(rest::login))
                 .route("/register", post(rest::register))
+                .with_state(app_state.clone())
                 .layer(middleware::from_fn_with_state(
                     rate_limit_state.clone(),
                     rate_limit_middleware,
                 )),
         )
-        .with_state(app_state.clone())
         // WebSocket（在查询参数中传递 token）
         .route("/ws", get(websocket::websocket_handler))
         .with_state(ws_state)
@@ -136,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .route("/stats", get(admin::get_system_stats)),
                 )
+                .with_state(app_state.clone())
                 .layer(middleware::from_fn_with_state(
                     auth_state.clone(),
                     auth::auth_middleware,
@@ -145,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
                     rate_limit_middleware,
                 )),
         )
-        .with_state(app_state)
         // 全局中间件
         .layer(middleware::from_fn(metrics_middleware))
         .layer(CompressionLayer::new())

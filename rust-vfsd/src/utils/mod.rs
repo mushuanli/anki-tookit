@@ -2,8 +2,6 @@
 
 pub mod compression;
 pub mod crypto;
-pub mod vector_clock;
 
-pub use compression::*;
-pub use crypto::*;
-pub use vector_clock::*;
+pub use compression::{CompressionUtils};
+pub use crypto::{CryptoUtils};

@@ -1,3 +1,5 @@
+// src/models/mod.rs
+
 pub mod chunk;
 pub mod conflict;
 pub mod sync_cursor;
@@ -5,9 +7,9 @@ pub mod sync_log;
 pub mod token;
 pub mod user;
 
-pub use chunk::*;
-pub use conflict::*;
-pub use sync_cursor::*;
-pub use sync_log::*;
-pub use token::*;
-pub use user::*;
+pub use chunk::{FileChunk,ChunkReference,FileChunkRow};
+pub use conflict::{ConflictType,ConflictResolution,SyncConflict,SyncConflictRow,ResolveConflictRequest};
+pub use sync_cursor::{SyncCursor,SyncCursorRow};
+pub use sync_log::{SyncChange,SyncLog,SyncLogRow,SyncOperation,VectorClock};
+pub use token::{ApiToken,ApiTokenRow,PathPermission,PermissionLevel,TokenInfo,CreateTokenResponse,CreateTokenRequest};
+pub use user::{User,CreateUserRequest,UpdateUserRequest,UserResponse};

@@ -4,7 +4,7 @@ use axum::{extract::Request, http::StatusCode, middleware::Next, response::Respo
 use once_cell::sync::Lazy;
 use prometheus::{
     register_counter_vec, register_gauge, register_histogram_vec,
-    CounterVec, Gauge, HistogramVec, TextEncoder, Encoder,
+    CounterVec, Gauge, HistogramVec, TextEncoder,
 };
 use std::time::Instant;
 

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+//use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::models::{ChunkReference, SyncChange};
 
@@ -36,6 +37,8 @@ pub struct SyncPacketResponse {
     pub error: Option<String>,
 }
 
+/// WebSocket 消息枚举
+/// 使用 tag = "type" 与客户端保持一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsMessage {
@@ -71,6 +74,8 @@ pub enum WsMessage {
         node_id: String,
     },
     
+    /// 分片头信息（JSON）
+    /// 发送后紧跟一个二进制帧
     #[serde(rename = "chunk_header")]
     ChunkHeader {
         req_id: String,
@@ -81,9 +86,45 @@ pub enum WsMessage {
         size: i64,
     },
     
-    #[serde(rename = "chunk_data")]
-    ChunkData {
+    /// 分片响应头（服务端响应分片请求时使用）
+    /// 发送后紧跟一个二进制帧
+    #[serde(rename = "chunk_response")]
+    ChunkResponse {
         req_id: String,
-        data: Vec<u8>,
+        content_hash: String,
+        index: i32,
+        total_chunks: i32,
+        checksum: String,
+        size: i64,
     },
+    
+    /// 分片上传请求头（客户端上传分片时使用）
+    #[serde(rename = "chunk_upload")]
+    ChunkUpload {
+        req_id: String,
+        content_hash: String,
+        index: i32,
+        total_chunks: i32,
+        checksum: String,
+        size: i64,
+        node_id: String,
+    },
+    
+    /// 分片上传确认
+    #[serde(rename = "chunk_ack")]
+    ChunkAck {
+        req_id: String,
+        content_hash: String,
+        index: i32,
+        success: bool,
+        error: Option<String>,
+    },
+}
+
+/// 用于发送二进制数据的包装
+/// 注意：这不是 WsMessage 的一部分，而是用于内部处理
+#[derive(Debug, Clone)]
+pub enum OutgoingMessage {
+    Json(WsMessage),
+    Binary(Vec<u8>),
 }

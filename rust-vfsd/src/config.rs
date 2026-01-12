@@ -1,7 +1,8 @@
 // src/config.rs
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use crate::error::{AppError, AppResult};
 
@@ -30,8 +31,8 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
-    #[serde(default = "default_db_url")]
-    pub url: String,
+    #[serde(default = "default_db_path")]
+    pub path: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
 }
@@ -60,70 +61,71 @@ pub struct SyncConfig {
     pub blocked_extensions: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum StorageType {
-    #[default]
-    Local,
-    S3,
-}
-
-impl std::fmt::Display for StorageType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StorageType::Local => write!(f, "local"),
-            StorageType::S3 => write!(f, "s3"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
-    #[serde(default)]
-    pub storage_type: StorageType,
-    #[serde(default = "default_local_path")]
-    pub local_path: Option<String>,
-    pub s3_bucket: Option<String>,
-    pub s3_region: Option<String>,
-    pub s3_prefix: Option<String>,
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    #[serde(default = "default_content_dir")]
+    pub content_dir: String,
+    #[serde(default = "default_chunks_dir")]
+    pub chunks_dir: String,
 }
 
 // 默认值函数
 fn default_host() -> String {
     "0.0.0.0".to_string()
 }
+
 fn default_port() -> u16 {
     8080
 }
-fn default_db_url() -> String {
-    "postgres://postgres:password@localhost:5432/vfs_sync".to_string()
+
+fn default_db_path() -> String {
+    "./data/vfs_sync.db".to_string()
 }
+
 fn default_max_connections() -> u32 {
-    10
+    5
 }
+
 fn default_jwt_secret() -> String {
     "change-this-secret-in-production".to_string()
 }
+
 fn default_jwt_expiry() -> i64 {
     24
 }
+
 fn default_refresh_expiry() -> i64 {
     30
 }
+
 fn default_max_packet_size() -> usize {
     10 * 1024 * 1024
 }
+
 fn default_chunk_size() -> usize {
     1024 * 1024
 }
+
 fn default_chunk_threshold() -> usize {
     5 * 1024 * 1024
 }
+
 fn default_max_file_size() -> usize {
     100 * 1024 * 1024
 }
-fn default_local_path() -> Option<String> {
-    Some("./data".to_string())
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./data")
+}
+
+fn default_content_dir() -> String {
+    "content".to_string()
+}
+
+fn default_chunks_dir() -> String {
+    "chunks".to_string()
 }
 
 impl Default for ServerConfig {
@@ -139,7 +141,7 @@ impl Default for ServerConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: default_db_url(),
+            path: default_db_path(),
             max_connections: default_max_connections(),
         }
     }
@@ -171,12 +173,20 @@ impl Default for SyncConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            storage_type: StorageType::Local,
-            local_path: default_local_path(),
-            s3_bucket: None,
-            s3_region: None,
-            s3_prefix: None,
+            data_dir: default_data_dir(),
+            content_dir: default_content_dir(),
+            chunks_dir: default_chunks_dir(),
         }
+    }
+}
+
+impl StorageConfig {
+    pub fn content_path(&self) -> PathBuf {
+        self.data_dir.join(&self.content_dir)
+    }
+
+    pub fn chunks_path(&self) -> PathBuf {
+        self.data_dir.join(&self.chunks_dir)
     }
 }
 

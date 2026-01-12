@@ -4,17 +4,62 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
+use chrono::{DateTime, Utc};
 
-use super::packet::WsMessage;
+use super::packet::OutgoingMessage;
 
 /// 设备会话
 pub struct DeviceSession {
     pub user_id: Uuid,
     pub device_id: String,
     pub device_name: Option<String>,
-    pub connected_at: chrono::DateTime<chrono::Utc>,
-    pub last_activity: chrono::DateTime<chrono::Utc>,
-    pub sender: mpsc::Sender<WsMessage>,
+    pub connected_at: DateTime<Utc>,
+    pub last_activity: RwLock<DateTime<Utc>>,  // 改为 RwLock 以支持更新
+    pub sender: mpsc::Sender<OutgoingMessage>,
+}
+
+impl DeviceSession {
+    pub fn new(
+        user_id: Uuid,
+        device_id: String,
+        device_name: Option<String>,
+        sender: mpsc::Sender<OutgoingMessage>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            user_id,
+            device_id,
+            device_name,
+            connected_at: now,
+            last_activity: RwLock::new(now),
+            sender,
+        }
+    }
+
+    pub async fn update_activity(&self) {
+        let mut activity = self.last_activity.write().await;
+        *activity = Utc::now();
+    }
+
+    pub async fn get_last_activity(&self) -> DateTime<Utc> {
+        *self.last_activity.read().await
+    }
+
+    /// 发送 JSON 消息
+    pub async fn send_json(&self, msg: super::packet::WsMessage) -> Result<(), String> {
+        self.sender
+            .send(OutgoingMessage::Json(msg))
+            .await
+            .map_err(|e| format!("Send failed: {}", e))
+    }
+
+    /// 发送二进制数据
+    pub async fn send_binary(&self, data: Vec<u8>) -> Result<(), String> {
+        self.sender
+            .send(OutgoingMessage::Binary(data))
+            .await
+            .map_err(|e| format!("Send failed: {}", e))
+    }
 }
 
 /// 会话管理器
@@ -36,30 +81,27 @@ impl SessionManager {
         user_id: Uuid,
         device_id: String,
         device_name: Option<String>,
-        sender: mpsc::Sender<WsMessage>,
+        sender: mpsc::Sender<OutgoingMessage>,
     ) -> Arc<DeviceSession> {
-        let now = chrono::Utc::now();
-        let session = Arc::new(DeviceSession {
+        let session = Arc::new(DeviceSession::new(
             user_id,
-            device_id: device_id.clone(),
+            device_id.clone(),
             device_name,
-            connected_at: now,
-            last_activity: now,
             sender,
-        });
+        ));
 
         let mut sessions = self.sessions.write().await;
         let user_sessions = sessions.entry(user_id).or_insert_with(HashMap::new);
         
-        // 如果同一设备已有连接，先关闭旧连接
+        // 如果同一设备已有连接，先通知旧连接
         if let Some(old_session) = user_sessions.get(&device_id) {
-            let _ = old_session.sender.send(WsMessage::Error {
+            let _ = old_session.send_json(super::packet::WsMessage::Error {
                 req_id: None,
                 message: "Session replaced by new connection".to_string(),
             }).await;
         }
         
-        user_sessions.insert(device_id, session.clone());
+        user_sessions.insert(device_id.clone(), session.clone());
         
         tracing::info!(
             "Session registered: user={}, device={}, total_devices={}",
@@ -83,6 +125,17 @@ impl SessionManager {
             }
             
             tracing::info!("Session unregistered: user={}, device={}", user_id, device_id);
+        }
+    }
+
+    /// 更新会话活动时间
+    pub async fn update_activity(&self, user_id: Uuid, device_id: &str) {
+        let sessions = self.sessions.read().await;
+        
+        if let Some(user_sessions) = sessions.get(&user_id) {
+            if let Some(session) = user_sessions.get(device_id) {
+                session.update_activity().await;
+            }
         }
     }
 
@@ -116,17 +169,17 @@ impl SessionManager {
             .unwrap_or_default()
     }
 
-    /// 广播消息给用户的其他设备
-    pub async fn broadcast_to_others(
+    /// 广播 JSON 消息给用户的其他设备
+    pub async fn broadcast_json_to_others(
         &self,
         user_id: Uuid,
         sender_device_id: &str,
-        message: WsMessage,
+        message: super::packet::WsMessage,
     ) {
         let other_devices = self.get_other_devices(user_id, sender_device_id).await;
         
         for device in other_devices {
-            if let Err(e) = device.sender.send(message.clone()).await {
+            if let Err(e) = device.send_json(message.clone()).await {
                 tracing::warn!(
                     "Failed to broadcast to device {}: {}",
                     device.device_id,
@@ -136,23 +189,18 @@ impl SessionManager {
         }
     }
 
-    /// 发送消息给指定设备
-    pub async fn send_to_device(
+    /// 发送 JSON 消息给指定设备
+    pub async fn send_json_to_device(
         &self,
         user_id: Uuid,
         device_id: &str,
-        message: WsMessage,
+        message: super::packet::WsMessage,
     ) -> Result<(), String> {
         let sessions = self.sessions.read().await;
         
         if let Some(user_sessions) = sessions.get(&user_id) {
             if let Some(session) = user_sessions.get(device_id) {
-                session
-                    .sender
-                    .send(message)
-                    .await
-                    .map_err(|e| format!("Send failed: {}", e))?;
-                return Ok(());
+                return session.send_json(message).await;
             }
         }
         
@@ -174,14 +222,15 @@ impl SessionManager {
 
     /// 清理不活跃的会话
     pub async fn cleanup_inactive(&self, max_idle_seconds: i64) {
-        let now = chrono::Utc::now();
+        let now = Utc::now();
         let mut sessions = self.sessions.write().await;
         
         let mut to_remove: Vec<(Uuid, String)> = Vec::new();
         
         for (user_id, user_sessions) in sessions.iter() {
             for (device_id, session) in user_sessions.iter() {
-                let idle_seconds = (now - session.last_activity).num_seconds();
+                let last_activity = session.get_last_activity().await;
+                let idle_seconds = (now - last_activity).num_seconds();
                 if idle_seconds > max_idle_seconds {
                     to_remove.push((*user_id, device_id.clone()));
                 }
@@ -191,7 +240,7 @@ impl SessionManager {
         for (user_id, device_id) in to_remove {
             if let Some(user_sessions) = sessions.get_mut(&user_id) {
                 if let Some(session) = user_sessions.remove(&device_id) {
-                    let _ = session.sender.send(WsMessage::Error {
+                    let _ = session.send_json(super::packet::WsMessage::Error {
                         req_id: None,
                         message: "Session timeout".to_string(),
                     }).await;

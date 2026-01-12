@@ -3,9 +3,9 @@
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::config::StorageConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::FileChunk;
 use crate::storage::Database;
@@ -17,18 +17,17 @@ pub struct ChunkManager {
 }
 
 impl ChunkManager {
-    pub fn new(config: &StorageConfig, chunk_size: usize, db: Database) -> Self {
-        let storage_path = config
-            .local_path
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("./data/chunks"));
-
+    pub fn new(storage_path: PathBuf, chunk_size: usize, db: Database) -> Self {
         Self {
             storage_path,
             chunk_size,
             db,
         }
+    }
+
+    /// 获取分片大小配置
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
     }
 
     /// 存储分片
@@ -62,7 +61,11 @@ impl ChunkManager {
         }
 
         // 写入文件
-        fs::write(&storage_path, data).await.map_err(|e| {
+        let mut file = fs::File::create(&storage_path).await.map_err(|e| {
+            AppError::InternalError(format!("Failed to create chunk file: {}", e))
+        })?;
+        
+        file.write_all(data).await.map_err(|e| {
             AppError::InternalError(format!("Failed to write chunk: {}", e))
         })?;
 
@@ -169,10 +172,10 @@ impl ChunkManager {
     }
 
     fn get_chunk_path(&self, user_id: Uuid, content_hash: &str, index: i32) -> PathBuf {
+        let prefix = &content_hash[..2.min(content_hash.len())];
         self.storage_path
             .join(user_id.to_string())
-            .join(&content_hash[..2])
-            .join(&content_hash[2..4])
+            .join(prefix)
             .join(format!("{}_{}", content_hash, index))
     }
 

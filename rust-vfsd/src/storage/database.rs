@@ -1,7 +1,9 @@
 // src/storage/database.rs
 
-use chrono::{Utc};
-use sqlx::{Pool, Postgres, Row};
+use chrono::Utc;
+use sqlx::{Pool, Sqlite, SqlitePool};
+use std::path::Path;
+use tokio::fs;
 use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
@@ -10,25 +12,200 @@ use crate::models::*;
 
 #[derive(Clone)]
 pub struct Database {
-    pool: Pool<Postgres>,
+    pool: Pool<Sqlite>,
 }
 
 impl Database {
     pub async fn new(config: &DatabaseConfig) -> AppResult<Self> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .connect(&config.url)
+        // 确保数据库目录存在
+        if let Some(parent) = Path::new(&config.path).parent() {
+            fs::create_dir_all(parent).await.map_err(|e| {
+                AppError::InternalError(format!("Failed to create database directory: {}", e))
+            })?;
+        }
+
+        // 创建连接池
+        let pool = SqlitePool::connect(&format!("sqlite:{}?mode=rwc", config.path))
             .await
             .map_err(|e| AppError::DatabaseError(e))?;
+
+        // 启用 WAL 模式和外键约束
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&pool)
+            .await?;
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await?;
 
         Ok(Self { pool })
     }
 
     pub async fn run_migrations(&self) -> AppResult<()> {
-        sqlx::migrate!("./migrations")
-            .run(&self.pool)
-            .await
-            .map_err(|e| AppError::InternalError(format!("Migration failed: {}", e)))?;
+        // 创建表结构
+        self.create_tables().await?;
+        Ok(())
+    }
+
+    async fn create_tables(&self) -> AppResult<()> {
+        // Users 表
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                email TEXT,
+                display_name TEXT,
+                storage_quota INTEGER NOT NULL DEFAULT 10737418240,
+                storage_used INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // API Tokens 表
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                permission_level TEXT NOT NULL,
+                path_permissions TEXT,
+                device_id TEXT,
+                device_name TEXT,
+                last_used_at TEXT,
+                expires_at TEXT,
+                is_revoked INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Sync Logs 表
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                module_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                path TEXT NOT NULL,
+                previous_path TEXT,
+                content_hash TEXT,
+                size INTEGER,
+                metadata TEXT,
+                version INTEGER NOT NULL,
+                vector_clock TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Sync Cursors 表
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_cursors (
+                user_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                module_id TEXT NOT NULL,
+                last_log_id INTEGER NOT NULL,
+                last_sync_time TEXT NOT NULL,
+                last_content_hash TEXT,
+                PRIMARY KEY (user_id, device_id, module_id),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Sync Conflicts 表
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sync_conflicts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                local_change TEXT NOT NULL,
+                remote_change TEXT NOT NULL,
+                conflict_type TEXT NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                resolution TEXT,
+                resolved_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // File Chunks 表
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS file_chunks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                total_chunks INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                checksum TEXT NOT NULL,
+                storage_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Content 索引表 (元数据，实际内容存储在文件系统)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS content_index (
+                user_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                storage_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, content_hash),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // 创建索引
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_logs_user_module ON sync_logs(user_id, module_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_logs_node ON sync_logs(user_id, module_id, node_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_file_chunks_hash ON file_chunks(user_id, content_hash)")
+            .execute(&self.pool)
+            .await?;
+
         Ok(())
     }
 
@@ -38,7 +215,7 @@ impl Database {
         sqlx::query(
             r#"
             INSERT INTO users (id, username, password_hash, email, display_name, storage_quota, storage_used, is_active, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&user.id)
@@ -58,15 +235,15 @@ impl Database {
     }
 
     pub async fn get_user_by_id(&self, id: Uuid) -> AppResult<Option<User>> {
-        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-            .bind(id)
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+            .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?;
         Ok(user)
     }
 
     pub async fn get_user_by_username(&self, username: &str) -> AppResult<Option<User>> {
-        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
             .bind(username)
             .fetch_optional(&self.pool)
             .await?;
@@ -75,11 +252,11 @@ impl Database {
 
     pub async fn update_user_storage(&self, user_id: Uuid, delta: i64) -> AppResult<()> {
         sqlx::query(
-            "UPDATE users SET storage_used = storage_used + $1, updated_at = $2 WHERE id = $3",
+            "UPDATE users SET storage_used = storage_used + ?, updated_at = ? WHERE id = ?",
         )
         .bind(delta)
-        .bind(Utc::now())
-        .bind(user_id)
+        .bind(Utc::now().to_rfc3339())
+        .bind(user_id.to_string())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -88,23 +265,27 @@ impl Database {
     // ==================== Token 相关 ====================
 
     pub async fn create_token(&self, token: &ApiToken) -> AppResult<()> {
+        let path_perms_json = token.path_permissions
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default());
+
         sqlx::query(
             r#"
             INSERT INTO api_tokens (id, user_id, name, token_hash, permission_level, path_permissions, device_id, device_name, expires_at, is_revoked, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&token.id)
-        .bind(&token.user_id)
+        .bind(token.id.to_string())
+        .bind(token.user_id.to_string())
         .bind(&token.name)
         .bind(&token.token_hash)
-        .bind(&token.permission_level)
-        .bind(&serde_json::to_value(&token.path_permissions).ok())
+        .bind(token.permission_level.to_string())
+        .bind(path_perms_json)
         .bind(&token.device_id)
         .bind(&token.device_name)
-        .bind(&token.expires_at)
-        .bind(&token.is_revoked)
-        .bind(&token.created_at)
+        .bind(token.expires_at.map(|dt| dt.to_rfc3339()))
+        .bind(token.is_revoked)
+        .bind(token.created_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
 
@@ -112,40 +293,43 @@ impl Database {
     }
 
     pub async fn get_token_by_hash(&self, token_hash: &str) -> AppResult<Option<ApiToken>> {
-        let token = sqlx::query_as::<_, ApiToken>(
-            "SELECT * FROM api_tokens WHERE token_hash = $1 AND is_revoked = false",
+        let row = sqlx::query_as::<_, ApiTokenRow>(
+            "SELECT * FROM api_tokens WHERE token_hash = ? AND is_revoked = 0",
         )
         .bind(token_hash)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(token)
+        
+        Ok(row.map(ApiToken::from))
     }
 
     pub async fn get_user_tokens(&self, user_id: Uuid) -> AppResult<Vec<ApiToken>> {
-        let tokens = sqlx::query_as::<_, ApiToken>(
-            "SELECT * FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC",
+        let rows = sqlx::query_as::<_, ApiTokenRow>(
+            "SELECT * FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC",
         )
-        .bind(user_id)
+        .bind(user_id.to_string())
         .fetch_all(&self.pool)
         .await?;
-        Ok(tokens)
+        
+        Ok(rows.into_iter().map(ApiToken::from).collect())
     }
 
     pub async fn revoke_token(&self, token_id: Uuid, user_id: Uuid) -> AppResult<bool> {
         let result = sqlx::query(
-            "UPDATE api_tokens SET is_revoked = true WHERE id = $1 AND user_id = $2",
+            "UPDATE api_tokens SET is_revoked = 1 WHERE id = ? AND user_id = ?",
         )
-        .bind(token_id)
-        .bind(user_id)
+        .bind(token_id.to_string())
+        .bind(user_id.to_string())
         .execute(&self.pool)
         .await?;
+        
         Ok(result.rows_affected() > 0)
     }
 
     pub async fn update_token_last_used(&self, token_id: Uuid) -> AppResult<()> {
-        sqlx::query("UPDATE api_tokens SET last_used_at = $1 WHERE id = $2")
-            .bind(Utc::now())
-            .bind(token_id)
+        sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(token_id.to_string())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -154,30 +338,34 @@ impl Database {
     // ==================== 同步日志相关 ====================
 
     pub async fn save_log(&self, log: &SyncLog) -> AppResult<i64> {
-        let row = sqlx::query(
+        let metadata_json = log.metadata
+            .as_ref()
+            .map(|m| serde_json::to_string(m).unwrap_or_default());
+        let vector_clock_json = serde_json::to_string(&log.vector_clock).unwrap_or_default();
+
+        let result = sqlx::query(
             r#"
             INSERT INTO sync_logs (user_id, module_id, node_id, device_id, operation, path, previous_path, content_hash, size, metadata, version, vector_clock, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            RETURNING id
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&log.user_id)
+        .bind(log.user_id.to_string())
         .bind(&log.module_id)
         .bind(&log.node_id)
         .bind(&log.device_id)
-        .bind(&log.operation)
+        .bind(log.operation.to_string())
         .bind(&log.path)
         .bind(&log.previous_path)
         .bind(&log.content_hash)
         .bind(&log.size)
-        .bind(&log.metadata)
+        .bind(metadata_json)
         .bind(&log.version)
-        .bind(&serde_json::to_value(&log.vector_clock).ok())
-        .bind(&log.created_at)
-        .fetch_one(&self.pool)
+        .bind(vector_clock_json)
+        .bind(log.created_at.to_rfc3339())
+        .execute(&self.pool)
         .await?;
 
-        Ok(row.get("id"))
+        Ok(result.last_insert_rowid())
     }
 
     pub async fn get_latest_log(
@@ -186,19 +374,20 @@ impl Database {
         module_id: &str,
         node_id: &str,
     ) -> AppResult<Option<SyncLog>> {
-        let log = sqlx::query_as::<_, SyncLog>(
+        let row = sqlx::query_as::<_, SyncLogRow>(
             r#"
             SELECT * FROM sync_logs 
-            WHERE user_id = $1 AND module_id = $2 AND node_id = $3
+            WHERE user_id = ? AND module_id = ? AND node_id = ?
             ORDER BY id DESC LIMIT 1
             "#,
         )
-        .bind(user_id)
+        .bind(user_id.to_string())
         .bind(module_id)
         .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(log)
+        
+        Ok(row.map(SyncLog::from))
     }
 
     pub async fn get_logs_after(
@@ -209,21 +398,22 @@ impl Database {
         limit: i64,
         exclude_device_id: &str,
     ) -> AppResult<Vec<SyncLog>> {
-        let logs = sqlx::query_as::<_, SyncLog>(
+        let rows = sqlx::query_as::<_, SyncLogRow>(
             r#"
             SELECT * FROM sync_logs 
-            WHERE user_id = $1 AND module_id = $2 AND id > $3 AND device_id != $4
-            ORDER BY id ASC LIMIT $5
+            WHERE user_id = ? AND module_id = ? AND id > ? AND device_id != ?
+            ORDER BY id ASC LIMIT ?
             "#,
         )
-        .bind(user_id)
+        .bind(user_id.to_string())
         .bind(module_id)
         .bind(after_id)
         .bind(exclude_device_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(logs)
+        
+        Ok(rows.into_iter().map(SyncLog::from).collect())
     }
 
     // ==================== 游标相关 ====================
@@ -234,109 +424,76 @@ impl Database {
         device_id: &str,
         module_id: &str,
     ) -> AppResult<Option<SyncCursor>> {
-        let cursor = sqlx::query_as::<_, SyncCursor>(
-            "SELECT * FROM sync_cursors WHERE user_id = $1 AND device_id = $2 AND module_id = $3",
+        let row = sqlx::query_as::<_, SyncCursorRow>(
+            "SELECT * FROM sync_cursors WHERE user_id = ? AND device_id = ? AND module_id = ?",
         )
-        .bind(user_id)
+        .bind(user_id.to_string())
         .bind(device_id)
         .bind(module_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(cursor)
+        
+        Ok(row.map(SyncCursor::from))
     }
 
     pub async fn update_cursor(&self, cursor: SyncCursor) -> AppResult<()> {
         sqlx::query(
             r#"
             INSERT INTO sync_cursors (user_id, device_id, module_id, last_log_id, last_sync_time, last_content_hash)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (user_id, device_id, module_id) 
-            DO UPDATE SET last_log_id = $4, last_sync_time = $5, last_content_hash = $6
+            DO UPDATE SET last_log_id = ?, last_sync_time = ?, last_content_hash = ?
             "#,
         )
-        .bind(&cursor.user_id)
+        .bind(cursor.user_id.to_string())
         .bind(&cursor.device_id)
         .bind(&cursor.module_id)
         .bind(&cursor.last_log_id)
-        .bind(&cursor.last_sync_time)
+        .bind(cursor.last_sync_time.to_rfc3339())
+        .bind(&cursor.last_content_hash)
+        .bind(&cursor.last_log_id)
+        .bind(cursor.last_sync_time.to_rfc3339())
         .bind(&cursor.last_content_hash)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    // ==================== 内容存储 ====================
-
-    pub async fn save_content(
-        &self,
-        user_id: Uuid,
-        content_hash: &str,
-        data: &[u8],
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO content_store (user_id, content_hash, data, size, created_at)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (user_id, content_hash) DO NOTHING
-            "#,
-        )
-        .bind(user_id)
-        .bind(content_hash)
-        .bind(data)
-        .bind(data.len() as i64)
-        .bind(Utc::now())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn get_content(
-        &self,
-        user_id: Uuid,
-        content_hash: &str,
-    ) -> AppResult<Option<Vec<u8>>> {
-        let row = sqlx::query(
-            "SELECT data FROM content_store WHERE user_id = $1 AND content_hash = $2",
-        )
-        .bind(user_id)
-        .bind(content_hash)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|r| r.get("data")))
-    }
-
     // ==================== 冲突相关 ====================
 
     pub async fn save_conflict(&self, conflict: &SyncConflict) -> AppResult<()> {
+        let local_json = serde_json::to_string(&conflict.local_change).unwrap_or_default();
+        let remote_json = serde_json::to_string(&conflict.remote_change).unwrap_or_default();
+
         sqlx::query(
             r#"
             INSERT INTO sync_conflicts (id, user_id, node_id, path, local_change, remote_change, conflict_type, resolved, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&conflict.id)
-        .bind(&conflict.user_id)
+        .bind(conflict.id.to_string())
+        .bind(conflict.user_id.to_string())
         .bind(&conflict.node_id)
         .bind(&conflict.path)
-        .bind(&serde_json::to_value(&conflict.local_change).ok())
-        .bind(&serde_json::to_value(&conflict.remote_change).ok())
-        .bind(&conflict.conflict_type)
-        .bind(&conflict.resolved)
-        .bind(&conflict.created_at)
+        .bind(local_json)
+        .bind(remote_json)
+        .bind(conflict.conflict_type.to_string())
+        .bind(conflict.resolved)
+        .bind(conflict.created_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
     pub async fn get_unresolved_conflicts(&self, user_id: Uuid) -> AppResult<Vec<SyncConflict>> {
-        let conflicts = sqlx::query_as::<_, SyncConflict>(
-            "SELECT * FROM sync_conflicts WHERE user_id = $1 AND resolved = false ORDER BY created_at DESC",
+        let rows = sqlx::query_as::<_, SyncConflictRow>(
+            "SELECT * FROM sync_conflicts WHERE user_id = ? AND resolved = 0 ORDER BY created_at DESC",
         )
-        .bind(user_id)
+        .bind(user_id.to_string())
         .fetch_all(&self.pool)
         .await?;
-        Ok(conflicts)
+        
+        Ok(rows.into_iter().map(SyncConflict::from).collect())
     }
 
     pub async fn resolve_conflict(
@@ -346,14 +503,15 @@ impl Database {
         resolution: ConflictResolution,
     ) -> AppResult<bool> {
         let result = sqlx::query(
-            "UPDATE sync_conflicts SET resolved = true, resolution = $1, resolved_at = $2 WHERE id = $3 AND user_id = $4",
+            "UPDATE sync_conflicts SET resolved = 1, resolution = ?, resolved_at = ? WHERE id = ? AND user_id = ?",
         )
-        .bind(&resolution)
-        .bind(Utc::now())
-        .bind(conflict_id)
-        .bind(user_id)
+        .bind(resolution.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .bind(conflict_id.to_string())
+        .bind(user_id.to_string())
         .execute(&self.pool)
         .await?;
+        
         Ok(result.rows_affected() > 0)
     }
 
@@ -362,21 +520,20 @@ impl Database {
     pub async fn save_chunk(&self, chunk: &FileChunk) -> AppResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO file_chunks (id, user_id, content_hash, chunk_index, total_chunks, size, checksum, storage_path, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (id) DO NOTHING
+            INSERT OR IGNORE INTO file_chunks (id, user_id, content_hash, chunk_index, total_chunks, size, checksum, storage_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&chunk.id)
-        .bind(&chunk.user_id)
+        .bind(chunk.user_id.to_string())
         .bind(&chunk.content_hash)
         .bind(&chunk.chunk_index)
         .bind(&chunk.total_chunks)
         .bind(&chunk.size)
         .bind(&chunk.checksum)
         .bind(&chunk.storage_path)
-        .bind(&chunk.created_at)
-                .execute(&self.pool)
+        .bind(chunk.created_at.to_rfc3339())
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -388,14 +545,15 @@ impl Database {
         index: i32,
     ) -> AppResult<Option<FileChunk>> {
         let chunk_id = format!("{}_{}", content_hash, index);
-        let chunk = sqlx::query_as::<_, FileChunk>(
-            "SELECT * FROM file_chunks WHERE id = $1 AND user_id = $2",
+        let row = sqlx::query_as::<_, FileChunkRow>(
+            "SELECT * FROM file_chunks WHERE id = ? AND user_id = ?",
         )
         .bind(&chunk_id)
-        .bind(user_id)
+        .bind(user_id.to_string())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(chunk)
+        
+        Ok(row.map(FileChunk::from))
     }
 
     pub async fn get_chunks_by_hash(
@@ -403,19 +561,70 @@ impl Database {
         user_id: Uuid,
         content_hash: &str,
     ) -> AppResult<Vec<FileChunk>> {
-        let chunks = sqlx::query_as::<_, FileChunk>(
-            "SELECT * FROM file_chunks WHERE user_id = $1 AND content_hash = $2 ORDER BY chunk_index",
+        let rows = sqlx::query_as::<_, FileChunkRow>(
+            "SELECT * FROM file_chunks WHERE user_id = ? AND content_hash = ? ORDER BY chunk_index",
         )
-        .bind(user_id)
+        .bind(user_id.to_string())
         .bind(content_hash)
         .fetch_all(&self.pool)
         .await?;
-        Ok(chunks)
+        
+        Ok(rows.into_iter().map(FileChunk::from).collect())
     }
 
     pub async fn delete_chunks_by_hash(&self, user_id: Uuid, content_hash: &str) -> AppResult<()> {
-        sqlx::query("DELETE FROM file_chunks WHERE user_id = $1 AND content_hash = $2")
-            .bind(user_id)
+        sqlx::query("DELETE FROM file_chunks WHERE user_id = ? AND content_hash = ?")
+            .bind(user_id.to_string())
+            .bind(content_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ==================== 内容索引相关 ====================
+
+    pub async fn save_content_index(
+        &self,
+        user_id: Uuid,
+        content_hash: &str,
+        size: i64,
+        storage_path: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO content_index (user_id, content_hash, size, storage_path, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(user_id.to_string())
+        .bind(content_hash)
+        .bind(size)
+        .bind(storage_path)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_content_path(
+        &self,
+        user_id: Uuid,
+        content_hash: &str,
+    ) -> AppResult<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT storage_path FROM content_index WHERE user_id = ? AND content_hash = ?",
+        )
+        .bind(user_id.to_string())
+        .bind(content_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        
+        Ok(row.map(|(path,)| path))
+    }
+
+    pub async fn delete_content_index(&self, user_id: Uuid, content_hash: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM content_index WHERE user_id = ? AND content_hash = ?")
+            .bind(user_id.to_string())
             .bind(content_hash)
             .execute(&self.pool)
             .await?;
