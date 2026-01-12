@@ -1,0 +1,32 @@
+# config/default.yaml
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  workers: ~
+
+database:
+  url: "postgres://postgres:password@localhost:5432/vfs_sync"
+  max_connections: 10
+
+auth:
+  jwt_secret: "your-super-secret-key-change-in-production"
+  jwt_expiry_hours: 24
+  refresh_expiry_days: 30
+
+sync:
+  max_packet_size: 10485760    # 10MB
+  chunk_size: 1048576          # 1MB
+  chunk_threshold: 5242880     # 5MB
+  max_file_size: 104857600     # 100MB
+  allowed_extensions: ~
+  blocked_extensions:
+    - exe
+    - dll
+    - so
+
+storage:
+  storage_type: local
+  local_path: "./data"
+  s3_bucket: ~
+  s3_region: ~
