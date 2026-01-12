@@ -1,16 +1,13 @@
 // src/sync/engine.rs
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::models::*;
 use crate::storage::Database;
-use crate::utils::compression::CompressionUtils;
-use crate::utils::vector_clock::VectorClockUtils;
+use tokio::sync::mpsc;
 
 use super::chunk_manager::ChunkManager;
 use super::conflict::{ConflictDetector, ConflictResult};
@@ -23,15 +20,10 @@ pub struct SyncEngine {
     chunk_manager: ChunkManager,
     filter: SyncFilter,
     config: Arc<Config>,
-    // 在线设备连接映射: user_id -> device_id -> channel
-    online_devices: Arc<RwLock<HashMap<Uuid, HashMap<String, DeviceConnection>>>>,
+    session_manager: Arc<SessionManager>,
 }
 
-pub struct DeviceConnection {
-    pub device_id: String,
-    pub device_name: Option<String>,
-    // 可以添加 WebSocket sender channel
-}
+// 移除未使用的 DeviceConnection 结构体，因为 SessionManager 已经有 DeviceSession
 
 impl SyncEngine {
     pub fn new(db: Database, config: Arc<Config>) -> Self {
@@ -66,8 +58,9 @@ impl SyncEngine {
         let mut processed_count = 0;
         let mut missing_chunks = Vec::new();
         let mut conflicts = Vec::new();
+        let mut changes_to_broadcast = Vec::new();
 
-        // 1. 检查分片是否完整
+        // 1. 检查分片完整性
         if let Some(refs) = &packet.chunk_refs {
             for chunk_ref in refs {
                 let missing = self
@@ -79,11 +72,7 @@ impl SyncEngine {
                     missing_chunks.push(format!(
                         "{}:{}",
                         chunk_ref.content_hash,
-                        missing
-                            .iter()
-                            .map(|i| i.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",")
+                        missing.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
                     ));
                 }
             }
@@ -129,6 +118,7 @@ impl SyncEngine {
                         self.save_content(user_id, hash, &packet).await?;
                     }
 
+                    changes_to_broadcast.push(change.clone());
                     processed_count += 1;
                 }
                 ConflictResult::KeepLocal => {
@@ -146,8 +136,8 @@ impl SyncEngine {
         }
 
         // 3. 广播变更到用户的其他设备
-        if processed_count > 0 {
-            self.broadcast_to_other_devices(user_id, device_id, &packet)
+        if !changes_to_broadcast.is_empty() {
+            self.broadcast_changes(user_id, device_id, &packet.module_id, changes_to_broadcast)
                 .await;
         }
 
@@ -169,16 +159,42 @@ impl SyncEngine {
             success: true,
             processed_count,
             missing_chunks: None,
-            conflicts: if conflicts.is_empty() {
-                None
-            } else {
-                Some(conflicts)
-            },
+            conflicts: if conflicts.is_empty() { None } else { Some(conflicts) },
             error: None,
         })
     }
 
-    /// 获取设备需要同步的变更
+    /// 广播变更到其他设备
+    async fn broadcast_changes(
+        &self,
+        user_id: Uuid,
+        sender_device_id: &str,
+        module_id: &str,
+        changes: Vec<SyncChange>,
+    ) {
+        let broadcast_packet = SyncPacket {
+            packet_id: Uuid::new_v4().to_string(),
+            peer_id: "server".to_string(),
+            module_id: module_id.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            changes,
+            inline_contents: None, // 其他设备需要自行拉取内容
+            chunk_refs: None,
+            compression: None,
+            signature: None,
+        };
+
+        let message = WsMessage::SyncPacket {
+            req_id: Uuid::new_v4().to_string(),
+            payload: broadcast_packet,
+        };
+
+        self.session_manager
+            .broadcast_to_others(user_id, sender_device_id, message)
+            .await;
+    }
+
+    /// 获取设备需要同步的变更（增量拉取）
     pub async fn get_pending_changes(
         &self,
         user_id: Uuid,
@@ -221,42 +237,42 @@ impl SyncEngine {
         self.db.get_content(user_id, content_hash).await
     }
 
-    /// 注册设备连接
+    /// 获取分片管理器
+    pub fn chunk_manager(&self) -> &ChunkManager {
+        &self.chunk_manager
+    }
+
+    /// 注册设备连接 - 修复：使用 session_manager
+    /// 注意：此方法现在需要一个 sender channel，但为了保持 API 兼容性，
+    /// 我们创建一个虚拟的 channel。实际的 WebSocket 注册应该在 websocket handler 中完成。
     pub async fn register_device(
         &self,
         user_id: Uuid,
         device_id: String,
         device_name: Option<String>,
     ) {
-        let mut devices = self.online_devices.write().await;
-        let user_devices = devices.entry(user_id).or_insert_with(HashMap::new);
-        user_devices.insert(
-            device_id.clone(),
-            DeviceConnection {
-                device_id,
-                device_name,
-            },
-        );
+        // 创建一个虚拟的 sender（实际不会使用，因为真正的注册在 WebSocket handler 中）
+        // 这个方法主要用于记录设备注册意图
+        let (tx, _rx) = mpsc::channel::<WsMessage>(1);
+        
+        self.session_manager
+            .register(user_id, device_id, device_name, tx)
+            .await;
     }
 
-    /// 注销设备连接
+    /// 注销设备连接 - 修复：使用 session_manager
     pub async fn unregister_device(&self, user_id: Uuid, device_id: &str) {
-        let mut devices = self.online_devices.write().await;
-        if let Some(user_devices) = devices.get_mut(&user_id) {
-            user_devices.remove(device_id);
-            if user_devices.is_empty() {
-                devices.remove(&user_id);
-            }
-        }
+        self.session_manager.unregister(user_id, device_id).await;
     }
 
-    /// 获取用户在线设备列表
+    /// 获取用户在线设备列表 - 修复：使用 session_manager
     pub async fn get_online_devices(&self, user_id: Uuid) -> Vec<String> {
-        let devices = self.online_devices.read().await;
-        devices
-            .get(&user_id)
-            .map(|d| d.keys().cloned().collect())
-            .unwrap_or_default()
+        self.session_manager
+            .get_user_devices(user_id)
+            .await
+            .into_iter()
+            .map(|session| session.device_id.clone())
+            .collect()
     }
 
     // ==================== 私有方法 ====================
@@ -295,14 +311,16 @@ impl SyncEngine {
         content_hash: &str,
         packet: &SyncPacket,
     ) -> AppResult<()> {
-        // 检查是否是内联内容
+        use crate::utils::CompressionUtils;
+
+        // 检查内联内容
         if let Some(ref inline_contents) = packet.inline_contents {
             if let Some(inline) = inline_contents.get(content_hash) {
                 let mut data = base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &inline.data,
                 )
-                .map_err(|e| AppError::ValidationError(format!("Invalid base64: {}", e)))?;
+                .map_err(|e| crate::error::AppError::ValidationError(format!("Invalid base64: {}", e)))?;
 
                 // 解压缩
                 if inline.compressed {
@@ -312,6 +330,10 @@ impl SyncEngine {
                 }
 
                 self.db.save_content(user_id, content_hash, &data).await?;
+                
+                // 更新用户存储使用量
+                self.db.update_user_storage(user_id, data.len() as i64).await?;
+                
                 return Ok(());
             }
         }
@@ -325,11 +347,8 @@ impl SyncEngine {
                     .await?;
 
                 self.db.save_content(user_id, content_hash, &data).await?;
-
-                // 清理分片
-                self.chunk_manager
-                    .cleanup_chunks(user_id, content_hash)
-                    .await?;
+                self.db.update_user_storage(user_id, data.len() as i64).await?;
+                self.chunk_manager.cleanup_chunks(user_id, content_hash).await?;
 
                 return Ok(());
             }
@@ -360,29 +379,17 @@ impl SyncEngine {
 
         self.db.save_conflict(&conflict).await?;
 
-        Ok(conflict.id)
-    }
+        // 通知用户所有设备有冲突
+        let message = WsMessage::Error {
+            req_id: None,
+            message: format!("Conflict detected for path: {}", conflict.path),
+        };
 
-    async fn broadcast_to_other_devices(
-        &self,
-        user_id: Uuid,
-        sender_device_id: &str,
-        packet: &SyncPacket,
-    ) {
-        let devices = self.online_devices.read().await;
-
-        if let Some(user_devices) = devices.get(&user_id) {
-            for (device_id, _conn) in user_devices {
-                if device_id != sender_device_id {
-                    // TODO: 通过 WebSocket channel 发送同步包
-                    // 这需要在 DeviceConnection 中添加 sender channel
-                    tracing::debug!(
-                        "Would broadcast {} changes to device {}",
-                        packet.changes.len(),
-                        device_id
-                    );
-                }
-            }
+        let devices = self.session_manager.get_user_devices(user_id).await;
+        for device in devices {
+            let _ = device.sender.send(message.clone()).await;
         }
+
+        Ok(conflict.id)
     }
 }

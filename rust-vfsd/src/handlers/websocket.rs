@@ -16,10 +16,7 @@ use crate::auth::{Claims, JwtService, PermissionChecker};
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::models::PermissionLevel;
-use crate::sync::{
-    packet::{SyncPacket, SyncPacketResponse, WsMessage},
-    SyncEngine,
-};
+use crate::sync::{packet::WsMessage, SyncEngine};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct WsQuery {
@@ -46,86 +43,106 @@ pub struct WsState {
 }
 
 async fn handle_socket(socket: WebSocket, claims: Claims, state: WsState) {
-    let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<Message>(32);
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    
+    // 创建用于接收广播消息的 channel
+    let (msg_tx, mut msg_rx) = mpsc::channel::<WsMessage>(32);
 
     let user_id = claims.sub;
     let device_id = claims.device_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    // 注册设备
-    state
+    // 通过 SessionManager 注册设备会话
+    let _session = state
         .sync_engine
-        .register_device(user_id, device_id.clone(), None)
+        .session_manager()
+        .register(user_id, device_id.clone(), None, msg_tx.clone())
         .await;
 
     tracing::info!("WebSocket connected: user={}, device={}", user_id, device_id);
 
-    // 发送任务
-    let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sender.send(msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // 接收任务
-    let sync_engine = state.sync_engine.clone();
-    let claims_clone = claims.clone();
-    let device_id_clone = device_id.clone();
-    let tx_clone = tx.clone();
-
-    let recv_task = tokio::spawn(async move {
-        while let Some(result) = receiver.next().await {
-            match result {
-                Ok(Message::Text(text)) => {
-                    if let Err(e) = handle_text_message(
-                        &text,
-                        &claims_clone,
-                        &device_id_clone,
-                        &sync_engine,
-                        &tx_clone,
-                    )
-                    .await
-                    {
-                        tracing::error!("Error handling message: {}", e);
-                        let error_msg = WsMessage::Error {
-                            req_id: None,
-                            message: e.to_string(),
-                        };
-                        if let Ok(json) = serde_json::to_string(&error_msg) {
-                            let _ = tx_clone.send(Message::Text(json)).await;
+    // 任务1: 将 channel 中的消息发送到 WebSocket
+    let send_task = {
+        let device_id = device_id.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = msg_rx.recv().await {
+                match serde_json::to_string(&msg) {
+                    Ok(json) => {
+                        if ws_sender.send(Message::Text(json)).await.is_err() {
+                            tracing::warn!("Failed to send to WebSocket, device={}", device_id);
+                            break;
                         }
                     }
-                }
-                Ok(Message::Binary(data)) => {
-                    // 处理二进制数据（分片）
-                    if let Err(e) = handle_binary_message(&data, &claims_clone, &sync_engine).await
-                    {
-                        tracing::error!("Error handling binary message: {}", e);
+                    Err(e) => {
+                        tracing::error!("Failed to serialize WsMessage: {}", e);
                     }
                 }
-                Ok(Message::Ping(data)) => {
-                    let _ = tx_clone.send(Message::Pong(data)).await;
-                }
-                Ok(Message::Close(_)) => break,
-                Err(e) => {
-                    tracing::error!("WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
             }
-        }
-    });
+        })
+    };
 
-    // 等待任何一个任务结束
+    // 任务2: 从 WebSocket 接收消息并处理
+    let recv_task = {
+        let sync_engine = state.sync_engine.clone();
+        let claims = claims.clone();
+        let device_id = device_id.clone();
+        let msg_tx = msg_tx.clone();
+
+        tokio::spawn(async move {
+            while let Some(result) = ws_receiver.next().await {
+                match result {
+                    Ok(Message::Text(text)) => {
+                        if let Err(e) = handle_text_message(
+                            &text,
+                            &claims,
+                            &device_id,
+                            &sync_engine,
+                            &msg_tx,
+                        )
+                        .await
+                        {
+                            tracing::error!("Error handling message: {}", e);
+                            let error_msg = WsMessage::Error {
+                                req_id: None,
+                                message: e.to_string(),
+                            };
+                            let _ = msg_tx.send(error_msg).await;
+                        }
+                    }
+                    Ok(Message::Binary(data)) => {
+                        if let Err(e) = handle_binary_message(&data, &claims, &sync_engine).await {
+                            tracing::error!("Error handling binary message: {}", e);
+                        }
+                    }
+                    Ok(Message::Ping(_data)) => {
+                        // Ping 需要直接响应，但我们已经 split 了 sender
+                        // axum 的 WebSocket 会自动处理 Ping/Pong
+                    }
+                    Ok(Message::Close(_)) => {
+                        tracing::info!("WebSocket close received: device={}", device_id);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+    };
+
+    // 等待任意一个任务结束
     tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
+        _ = send_task => {
+            tracing::debug!("Send task ended for device={}", device_id);
+        },
+        _ = recv_task => {
+            tracing::debug!("Recv task ended for device={}", device_id);
+        },
     }
 
-    // 注销设备
-    state.sync_engine.unregister_device(user_id, &device_id).await;
+    // 注销设备会话
+    state.sync_engine.session_manager().unregister(user_id, &device_id).await;
     tracing::info!("WebSocket disconnected: user={}, device={}", user_id, device_id);
 }
 
@@ -134,7 +151,7 @@ async fn handle_text_message(
     claims: &Claims,
     device_id: &str,
     sync_engine: &SyncEngine,
-    tx: &mpsc::Sender<Message>,
+    tx: &mpsc::Sender<WsMessage>,
 ) -> AppResult<()> {
     let msg: WsMessage = serde_json::from_str(text)
         .map_err(|e| AppError::ValidationError(format!("Invalid message: {}", e)))?;
@@ -142,8 +159,7 @@ async fn handle_text_message(
     match msg {
         WsMessage::Ping { timestamp } => {
             let pong = WsMessage::Pong { timestamp };
-            let json = serde_json::to_string(&pong)?;
-            tx.send(Message::Text(json)).await.ok();
+            tx.send(pong).await.ok();
         }
 
         WsMessage::SyncPacket { req_id, payload } => {
@@ -162,19 +178,15 @@ async fn handle_text_message(
                 .process_packet(claims.sub, device_id, payload)
                 .await?;
 
-            let ack = WsMessage::Ack {
-                req_id,
-                response,
-            };
-            let json = serde_json::to_string(&ack)?;
-            tx.send(Message::Text(json)).await.ok();
+            let ack = WsMessage::Ack { req_id, response };
+            tx.send(ack).await.ok();
         }
 
         WsMessage::RequestChunk {
             req_id,
             content_hash,
             index,
-            node_id,
+            node_id: _,
         } => {
             // 获取分片数据
             match sync_engine.get_content(claims.sub, &content_hash).await {
@@ -188,25 +200,27 @@ async fn handle_text_message(
                         checksum: "".to_string(),
                         size: content.len() as i64,
                     };
-                    let header_json = serde_json::to_string(&header)?;
-                    tx.send(Message::Text(header_json)).await.ok();
-                    tx.send(Message::Binary(content)).await.ok();
+                    tx.send(header).await.ok();
+                    
+                    let chunk_data = WsMessage::ChunkData {
+                        req_id,
+                        data: content,
+                    };
+                    tx.send(chunk_data).await.ok();
                 }
                 Ok(None) => {
                     let error = WsMessage::Error {
                         req_id: Some(req_id),
                         message: "Content not found".to_string(),
                     };
-                    let json = serde_json::to_string(&error)?;
-                    tx.send(Message::Text(json)).await.ok();
+                    tx.send(error).await.ok();
                 }
                 Err(e) => {
                     let error = WsMessage::Error {
                         req_id: Some(req_id),
                         message: e.to_string(),
                     };
-                    let json = serde_json::to_string(&error)?;
-                    tx.send(Message::Text(json)).await.ok();
+                    tx.send(error).await.ok();
                 }
             }
         }

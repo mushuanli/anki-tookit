@@ -2,7 +2,7 @@
 
 use axum::{
     middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -17,15 +17,17 @@ mod auth;
 mod config;
 mod error;
 mod handlers;
+mod metrics;
 mod models;
 mod storage;
 mod sync;
 mod utils;
 
-use auth::{AuthState, JwtService};
+use auth::{rate_limit::{RateLimitConfig, RateLimiter, RateLimitState, rate_limit_middleware}, AuthState, JwtService};
 use config::Config;
 use handlers::{admin, health, rest, websocket};
-use storage::Database;
+use metrics::{init_metrics, metrics_handler, metrics_middleware};
+use storage::{cache::{CacheConfig, MemoryCache}, Database};
 use sync::SyncEngine;
 
 #[tokio::main]
@@ -39,6 +41,9 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // 初始化指标
+    init_metrics();
+
     // 加载配置
     let config = Config::load().unwrap_or_else(|e| {
         tracing::warn!("Failed to load config, using defaults: {}", e);
@@ -46,14 +51,23 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tracing::info!("Starting VFS Sync Server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Server configuration: {}:{}", config.server.host, config.server.port);
 
     // 初始化数据库
     let db = Database::new(&config.database).await?;
     db.run_migrations().await?;
     tracing::info!("Database connected and migrations complete");
 
+    // 初始化缓存
+    let cache = Arc::new(MemoryCache::new(CacheConfig::default()));
+
     // 初始化同步引擎
     let sync_engine = Arc::new(SyncEngine::new(db.clone(), config.clone()));
+    tracing::info!("Sync engine initialized");
+
+    // 初始化速率限制
+    let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
+    rate_limiter.clone().start_cleanup_task();
 
     // 创建应用状态
     let app_state = rest::AppState {
@@ -70,14 +84,28 @@ async fn main() -> anyhow::Result<()> {
         jwt_service: Arc::new(JwtService::new(&config.auth)),
     };
 
+    let rate_limit_state = RateLimitState {
+        limiter: rate_limiter,
+    };
+
     // 构建路由
     let app = Router::new()
-        // 健康检查（无需认证）
+        // 健康检查和指标（无需认证）
         .route("/health", get(health::health_check))
         .route("/ready", get(health::ready_check))
-        // 认证相关（无需认证）
-        .route("/api/v1/auth/login", post(rest::login))
-        .route("/api/v1/auth/register", post(rest::register))
+        .route("/metrics", get(metrics_handler))
+        // 认证相关（无需认证，但需要速率限制）
+        .nest(
+            "/api/v1/auth",
+            Router::new()
+                .route("/login", post(rest::login))
+                .route("/register", post(rest::register))
+                .layer(middleware::from_fn_with_state(
+                    rate_limit_state.clone(),
+                    rate_limit_middleware,
+                )),
+        )
+        .with_state(app_state.clone())
         // WebSocket（在查询参数中传递 token）
         .route("/ws", get(websocket::websocket_handler))
         .with_state(ws_state)
@@ -100,18 +128,26 @@ async fn main() -> anyhow::Result<()> {
                     "/admin",
                     Router::new()
                         .route("/users", get(admin::list_users))
-                        .route("/users/:user_id", get(admin::get_user)
-                            .put(admin::update_user_admin)
-                            .delete(admin::delete_user))
+                        .route(
+                            "/users/:user_id",
+                            get(admin::get_user)
+                                .put(admin::update_user_admin)
+                                .delete(admin::delete_user),
+                        )
                         .route("/stats", get(admin::get_system_stats)),
                 )
                 .layer(middleware::from_fn_with_state(
                     auth_state.clone(),
                     auth::auth_middleware,
+                ))
+                .layer(middleware::from_fn_with_state(
+                    rate_limit_state,
+                    rate_limit_middleware,
                 )),
         )
         .with_state(app_state)
         // 全局中间件
+        .layer(middleware::from_fn(metrics_middleware))
         .layer(CompressionLayer::new())
         .layer(
             CorsLayer::new()
@@ -126,7 +162,18 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Server listening on {}", addr);
 
-    axum::serve(listener, app).await?;
+    // 优雅关闭
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
+        tracing::info!("Shutdown signal received, starting graceful shutdown...");
+    };
 
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
+
+    tracing::info!("Server shutdown complete");
     Ok(())
 }

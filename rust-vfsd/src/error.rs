@@ -5,8 +5,14 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde::Serialize;
 use thiserror::Error;
+
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    pub code: String,
+    pub message: String,
+}
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -24,57 +30,73 @@ pub enum AppError {
     
     #[error("Validation error: {0}")]
     ValidationError(String),
-    
+
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
-    
-    #[error("File too large: {size} bytes (max: {max})")]
-    FileTooLarge { size: usize, max: usize },
-    
-    #[error("File type not allowed: {0}")]
-    FileTypeNotAllowed(String),
-    
+
     #[error("Database error: {0}")]
     DatabaseError(#[from] sqlx::Error),
-    
+
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
 }
+
+pub type AppResult<T> = Result<T, AppError>;
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
             AppError::AuthError(msg) => (StatusCode::UNAUTHORIZED, "AUTH_ERROR", msg.clone()),
-            AppError::PermissionDenied(msg) => (StatusCode::FORBIDDEN, "PERMISSION_DENIED", msg.clone()),
+            AppError::PermissionDenied(msg) => {
+                (StatusCode::FORBIDDEN, "PERMISSION_DENIED", msg.clone())
+            }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg.clone()),
-            AppError::ValidationError(msg) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR", msg.clone()),
-            AppError::RateLimitExceeded => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMIT", "Rate limit exceeded".to_string()),
-            AppError::FileTooLarge { size, max } => (
-                StatusCode::PAYLOAD_TOO_LARGE, 
-                "FILE_TOO_LARGE", 
-                format!("File size {} exceeds limit {}", size, max)
+            AppError::ValidationError(msg) => {
+                (StatusCode::BAD_REQUEST, "VALIDATION_ERROR", msg.clone())
+            }
+            AppError::ConfigError(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "CONFIG_ERROR", msg.clone())
+            }
+            AppError::RateLimitExceeded => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMIT_EXCEEDED",
+                "Too many requests".to_string(),
             ),
-            AppError::FileTypeNotAllowed(ext) => (StatusCode::BAD_REQUEST, "FILE_TYPE_NOT_ALLOWED", format!("File type {} not allowed", ext)),
-            AppError::DatabaseError(e) => {
-                tracing::error!("Database error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR", "Database error".to_string())
-            }
+            AppError::DatabaseError(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DATABASE_ERROR",
+                e.to_string(),
+            ),
             AppError::InternalError(msg) => {
-                tracing::error!("Internal error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Internal server error".to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg.clone())
             }
+            AppError::SerializationError(e) => (
+                StatusCode::BAD_REQUEST,
+                "SERIALIZATION_ERROR",
+                e.to_string(),
+            ),
+            AppError::IoError(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                e.to_string(),
+            ),
         };
 
-        let body = Json(json!({
-            "error": {
-                "code": code,
-                "message": message
-            }
-        }));
+        let body = Json(ErrorResponse {
+            code: code.to_string(),
+            message,
+        });
 
         (status, body).into_response()
     }
 }
-
-pub type AppResult<T> = Result<T, AppError>;

@@ -1,7 +1,5 @@
 // src/utils/vector_clock.rs
 
-use std::collections::HashMap;
-
 use crate::models::VectorClock;
 use crate::sync::conflict::ClockRelation;
 
@@ -51,9 +49,9 @@ impl VectorClockUtils {
 
         match (has_greater, has_less) {
             (false, false) => ClockRelation::Equal,
-            (true, false) => ClockRelation::Descendant,  // clock1 更新
-            (false, true) => ClockRelation::Ancestor,    // clock1 更旧
-            (true, true) => ClockRelation::Concurrent,   // 并发
+            (true, false) => ClockRelation::Descendant, // clock1 更新
+            (false, true) => ClockRelation::Ancestor,   // clock1 更旧
+            (true, true) => ClockRelation::Concurrent,  // 并发
         }
     }
 }
@@ -61,6 +59,7 @@ impl VectorClockUtils {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_increment() {

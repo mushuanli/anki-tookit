@@ -32,7 +32,7 @@ pub struct PaginatedResponse<T> {
 
 pub async fn list_users(
     Extension(claims): Extension<Claims>,
-    State(state): State<AppState>,
+    State(_state): State<AppState>, // Fixed: unused variable
     Query(query): Query<ListUsersQuery>,
 ) -> AppResult<Json<PaginatedResponse<UserResponse>>> {
     // 检查管理员权限
@@ -79,7 +79,7 @@ pub async fn update_user_admin(
     Extension(claims): Extension<Claims>,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
-    Json(req): Json<UpdateUserAdminRequest>,
+    Json(_req): Json<UpdateUserAdminRequest>, // Fixed: unused variable
 ) -> AppResult<Json<UserResponse>> {
     if claims.permission_level != PermissionLevel::Admin {
         return Err(AppError::PermissionDenied("Admin access required".to_string()));
@@ -98,8 +98,8 @@ pub async fn update_user_admin(
 
 pub async fn delete_user(
     Extension(claims): Extension<Claims>,
-    State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    State(_state): State<AppState>, // Fixed: unused variable
+    Path(_user_id): Path<Uuid>,     // Fixed: unused variable
 ) -> AppResult<StatusCode> {
     if claims.permission_level != PermissionLevel::Admin {
         return Err(AppError::PermissionDenied("Admin access required".to_string()));
@@ -123,7 +123,7 @@ pub struct SystemStats {
 
 pub async fn get_system_stats(
     Extension(claims): Extension<Claims>,
-    State(state): State<AppState>,
+    State(_state): State<AppState>, // Fixed: unused variable
 ) -> AppResult<Json<SystemStats>> {
     if claims.permission_level != PermissionLevel::Admin {
         return Err(AppError::PermissionDenied("Admin access required".to_string()));

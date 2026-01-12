@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
-use crate::sync::packet::WsMessage;
+use super::packet::WsMessage;
 
 /// 设备会话
 pub struct DeviceSession {

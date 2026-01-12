@@ -1,8 +1,7 @@
 // src/storage/database.rs
 
-use chrono::{DateTime, Utc};
+use chrono::{Utc};
 use sqlx::{Pool, Postgres, Row};
-use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
