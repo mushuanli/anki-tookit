@@ -3,6 +3,83 @@
 
 编译完成后，你的二进制文件不仅是一个 Web 服务器，也是一个管理工具。
 
+```bash
+# 默认启动服务器
+cargo run --bin vfs
+
+# 或显式指定
+cargo run --bin vfs server
+```
+# 用户管理
+```bash
+# 创建用户
+cargo run --bin vfs user create -u admin -p admin123 -e admin@example.com -d "Administrator"
+
+# 列出用户
+cargo run --bin vfs user list
+
+# 搜索用户
+cargo run --bin vfs user list -s "admin"
+
+# 重置密码
+cargo run --bin vfs user reset-password -u admin -p newpassword
+
+# 禁用用户
+cargo run --bin vfs user disable -u testuser
+
+# 启用用户
+cargo run --bin vfs user enable -u testuser
+
+```
+
+# 数据库管理
+```bash
+# 查看数据库状态
+cargo run --bin vfs db status
+
+# 运行迁移
+cargo run --bin vfs db migrate
+
+```
+
+# 测试运行
+```bash
+# 运行所有测试
+cargo test
+
+# 运行特定 crate 的测试
+cargo test -p vfs-service
+
+# 运行特定测试
+cargo test -p vfs-service test_create_user
+
+# 带输出运行测试
+cargo test -p vfs-service -- --nocapture
+
+```
+
+# 架构总结
+关键改进
+- 服务层抽象 (services/)  
+  - 每个服务独立可测试  
+  - 业务逻辑与 HTTP 层分离  
+  - 便于 mock 和单元测试  
+
+- 服务容器 (ServiceContainer)  
+  - 统一管理所有服务实例  
+  - 支持依赖注入  
+  - 便于测试时替换组件  
+
+- 测试支持  
+  - 每个服务都有对应的单元测试  
+  - TestEnv 提供完整的测试环境  
+  - 使用 tempfile 隔离测试数据  
+
+- CLI 简化 (vfs-cmd)  
+  - 仅调用服务层接口. 
+  - 不包含业务逻辑  
+  - 易于维护和扩展. 
+
 #### 1. 查看状态 (Web 方式)
 
 启动服务器：

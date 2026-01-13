@@ -1,0 +1,26 @@
+# apps/vfs-cmd/Cargo.toml
+[package]
+name = "vfs-cmd"
+version.workspace = true
+
+[[bin]]
+name = "vfs"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates
+vfs-core = { path = "../../crates/vfs-core" }
+vfs-storage = { path = "../../crates/vfs-storage" }
+vfs-service = { path = "../../crates/vfs-service" }
+
+# Async
+tokio = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

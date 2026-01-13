@@ -1,3 +1,4 @@
+# Cargo.toml (workspace root)
 [workspace]
 resolver = "2"
 
@@ -6,10 +7,16 @@ members = [
     "crates/vfs-core",
     "crates/vfs-storage",
     "crates/vfs-sync",
-    "apps/server",
+    "crates/vfs-service",
+    "apps/vfs-cmd",
 ]
 
-# [可选] 统一定义依赖版本，子 crate 可以直接引用
+[workspace.package]
+version = "0.1.0"
+edition = "2026"
+authors = ["lizl@gmail.com"]
+license = "MIT"
+
 [workspace.dependencies]
 # Web 框架
 axum = { version = "0.7", features = ["ws", "macros"] }

@@ -1,4 +1,4 @@
-// src/metrics.rs
+// crates/vfs-service/src/metrics.rs
 
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use once_cell::sync::Lazy;
@@ -8,7 +8,6 @@ use prometheus::{
 };
 use std::time::Instant;
 
-// 定义指标
 static HTTP_REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "http_requests_total",
@@ -62,7 +61,6 @@ static STORAGE_BYTES_TOTAL: Lazy<Gauge> = Lazy::new(|| {
     .unwrap()
 });
 
-/// 初始化指标（确保所有指标都被注册）
 pub fn init_metrics() {
     Lazy::force(&HTTP_REQUESTS_TOTAL);
     Lazy::force(&HTTP_REQUEST_DURATION);
@@ -72,7 +70,6 @@ pub fn init_metrics() {
     Lazy::force(&STORAGE_BYTES_TOTAL);
 }
 
-/// 指标中间件
 pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
@@ -94,7 +91,6 @@ pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     response
 }
 
-/// 获取指标端点处理器
 pub async fn metrics_handler() -> Result<String, StatusCode> {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
@@ -104,7 +100,6 @@ pub async fn metrics_handler() -> Result<String, StatusCode> {
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// 指标记录辅助函数
 pub struct MetricsRecorder;
 
 impl MetricsRecorder {
@@ -131,5 +126,26 @@ impl MetricsRecorder {
 
     pub fn set_storage_bytes(bytes: f64) {
         STORAGE_BYTES_TOTAL.set(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_recorder() {
+        init_metrics();
+        
+        MetricsRecorder::record_ws_connect();
+        MetricsRecorder::record_ws_connect();
+        MetricsRecorder::record_ws_disconnect();
+        
+        MetricsRecorder::record_sync_operation("upload", true);
+        MetricsRecorder::record_sync_operation("download", false);
+        
+        MetricsRecorder::record_conflict("content");
+        
+        MetricsRecorder::set_storage_bytes(1024.0);
     }
 }

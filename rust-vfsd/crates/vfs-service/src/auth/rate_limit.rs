@@ -1,4 +1,5 @@
-// src/auth/rate_limit.rs
+// crates/vfs-service/src/auth/rate_limit.rs
+// 与原有代码相同
 
 use axum::{
     extract::{Request, State},
@@ -12,7 +13,6 @@ use tokio::sync::RwLock;
 
 use vfs_core::error::AppError;
 
-/// 速率限制配置
 #[derive(Clone)]
 pub struct RateLimitConfig {
     pub requests_per_second: u32,
@@ -28,7 +28,6 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// 令牌桶
 struct TokenBucket {
     tokens: f64,
     last_update: Instant,
@@ -50,7 +49,6 @@ impl TokenBucket {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
         
-        // 补充令牌
         self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
         self.last_update = now;
 
@@ -63,10 +61,8 @@ impl TokenBucket {
     }
 }
 
-/// 速率限制器
 pub struct RateLimiter {
     buckets: RwLock<HashMap<String, TokenBucket>>,
-    
     config: RateLimitConfig,
 }
 
@@ -91,7 +87,6 @@ impl RateLimiter {
         bucket.try_consume()
     }
 
-    /// 清理过期的令牌桶
     pub async fn cleanup(&self, max_idle: Duration) {
         let mut buckets = self.buckets.write().await;
         let now = Instant::now();
@@ -101,7 +96,6 @@ impl RateLimiter {
         });
     }
 
-    /// 启动清理任务
     pub fn start_cleanup_task(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -113,19 +107,16 @@ impl RateLimiter {
     }
 }
 
-/// 速率限制中间件状态
 #[derive(Clone)]
 pub struct RateLimitState {
     pub limiter: Arc<RateLimiter>,
 }
 
-/// 速率限制中间件
 pub async fn rate_limit_middleware(
     State(state): State<RateLimitState>,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // 获取客户端标识（IP 或用户 ID）
     let key = extract_client_key(&request);
 
     if !state.limiter.check(&key).await {
@@ -136,7 +127,6 @@ pub async fn rate_limit_middleware(
 }
 
 fn extract_client_key(request: &Request) -> String {
-    // 优先使用 X-Forwarded-For 头
     if let Some(forwarded) = request.headers().get("x-forwarded-for") {
         if let Ok(value) = forwarded.to_str() {
             if let Some(ip) = value.split(',').next() {
@@ -145,10 +135,42 @@ fn extract_client_key(request: &Request) -> String {
         }
     }
 
-    // 使用连接信息
     request
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_rate_limiter_allows_requests() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_second: 10,
+            burst_size: 10,
+        });
+
+        // 前 10 个请求应该被允许
+        for _ in 0..10 {
+            assert!(limiter.check("test-client").await);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_blocks_excess() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_second: 1,
+            burst_size: 2,
+        });
+
+        // 前 2 个请求应该被允许
+        assert!(limiter.check("test-client").await);
+        assert!(limiter.check("test-client").await);
+        
+        // 第 3 个请求应该被阻止
+        assert!(!limiter.check("test-client").await);
+    }
 }

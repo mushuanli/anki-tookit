@@ -1,0 +1,46 @@
+# crates/vfs-service/Cargo.toml
+[package]
+name = "vfs-service"
+version.workspace = true
+
+[dependencies]
+# Workspace crates
+vfs-core = { path = "../vfs-core" }
+vfs-storage = { path = "../vfs-storage" }
+vfs-sync = { path = "../vfs-sync" }
+
+# Async
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Web
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Auth
+jsonwebtoken = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true }
+once_cell = { workspace = true }
+
+# Pattern matching
+regex = { workspace = true }
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+tempfile = "3"
