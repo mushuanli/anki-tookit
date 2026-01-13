@@ -1,0 +1,17 @@
+[package]
+name = "vfs-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vfs-core = { path = "../vfs-core" }
+
+tokio = { workspace = true }
+sqlx = { workspace = true } # 这里需要 runtime
+moka = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

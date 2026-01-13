@@ -1,16 +1,16 @@
-[package]
-name = "itookit-sync-server"
-version = "0.1.0"
-edition = "2021"
-authors = ["Your Name <lizlok@gmmail.com>"]
-description = "VFS Sync Server - Multi-device file synchronization service"
-license = "MIT"
+[workspace]
+resolver = "2"
 
-[features]
-default = []
-redis-cache = ["redis"]
+# 定义包含的成员路径
+members = [
+    "crates/vfs-core",
+    "crates/vfs-storage",
+    "crates/vfs-sync",
+    "apps/server",
+]
 
-[dependencies]
+# [可选] 统一定义依赖版本，子 crate 可以直接引用
+[workspace.dependencies]
 # Web 框架
 axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.4"
@@ -78,7 +78,4 @@ regex = "1"  # 添加这个
 
 
 # 可选: Redis 支持
-redis = { version = "0.25", features = ["tokio-comp", "connection-manager"], optional = true }
-
-[dev-dependencies]
-tokio-test = "0.4"
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"]}

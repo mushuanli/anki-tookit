@@ -1,0 +1,25 @@
+[package]
+name = "vfs-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 使用 workspace 定义的版本
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+argon2 = { workspace = true }
+flate2 = { workspace = true }
+brotli = { workspace = true }
+regex = { workspace = true }
+config = { workspace = true }
+dotenvy = { workspace = true }
+# sqlx 在这里只用于 FromRow 宏，不需要 runtime
+sqlx = { workspace = true } 
+jsonwebtoken = { workspace = true }
+axum = { workspace = true }
