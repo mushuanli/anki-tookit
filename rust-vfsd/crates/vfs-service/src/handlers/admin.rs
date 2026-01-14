@@ -5,14 +5,15 @@ use axum::{
     http::StatusCode,
     Extension, Json,
 };
-use serde::{Deserialize, Serialize};
+// 修复：添加 Serialize
+use serde::{Deserialize, Serialize}; 
 use uuid::Uuid;
 
 use crate::auth::Claims;
 use crate::handlers::rest::AppState;
-use crate::services::admin_service::{PaginatedResponse, UpdateUserAdminRequest};
+use crate::services::admin_service::{UpdateUserAdminRequest};
 use vfs_core::error::AppResult;
-use vfs_core::models::*;
+use vfs_core::models::{UserResponse, SystemStats}; // 确保引入
 
 #[derive(Debug, Deserialize)]
 pub struct ListUsersQuery {

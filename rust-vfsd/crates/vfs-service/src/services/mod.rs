@@ -18,7 +18,7 @@ pub use token_service::TokenService;
 pub use user_service::UserService;
 
 use std::sync::Arc;
-use vfs_storage::{CachedDatabase, FileStore, CacheService};
+use vfs_storage::{CachedDatabase, FileStore};
 use vfs_sync::SyncEngine;
 use vfs_core::config::Config;
 

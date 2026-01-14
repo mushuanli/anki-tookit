@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
-use vfs_core::error::{AppError, AppResult};
+use vfs_core::error::{AppResult};
 use vfs_core::models::{
     ApiToken, CreateTokenRequest, CreateTokenResponse, PermissionLevel, TokenInfo,
 };

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize}; // 添加 Serialize
 
 use vfs_core::error::{AppError, AppResult};
 use vfs_core::models::{PermissionLevel, SystemStats, User, UserResponse};
@@ -9,7 +10,7 @@ use vfs_storage::CachedDatabase;
 use vfs_sync::SyncEngine;
 
 /// 分页响应
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)] // 添加 Serialize, Deserialize
 pub struct PaginatedResponse<T> {
     pub data: Vec<T>,
     pub total: i64,

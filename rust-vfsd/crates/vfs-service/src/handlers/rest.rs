@@ -10,9 +10,14 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::{Claims, PermissionChecker};
-use crate::services::{ServiceContainer, AdminService};
+use crate::services::ServiceContainer; // Removed AdminService as it's part of container
 use vfs_core::error::{AppError, AppResult};
-use vfs_core::models::*;
+// 修正导入：将分散的导入统一并在 models 中查找
+use vfs_core::models::{
+    CreateTokenRequest, CreateTokenResponse, CreateUserRequest, PermissionLevel, 
+    SyncChange, SyncConflict, TokenInfo, UserResponse, ResolveConflictRequest, 
+    UpdateUserRequest // 确保这些在 vfs_core::models 中定义
+};
 use vfs_storage::{CachedDatabase, FileStore};
 use vfs_sync::SyncEngine;
 
@@ -213,8 +218,6 @@ pub struct DeviceInfo {
     pub last_sync_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-// crates/vfs-service/src/handlers/rest.rs (续)
-
 pub async fn list_devices(
     Extension(claims): Extension<Claims>,
     State(state): State<AppState>,
@@ -225,7 +228,7 @@ pub async fn list_devices(
         .into_iter()
         .map(|device_id| DeviceInfo {
             device_id,
-            device_name: None,
+            device_name: None, // 这里简化处理，实际可能需要从 SessionManager 获取更多信息
             is_online: true,
             last_sync_time: None,
         })

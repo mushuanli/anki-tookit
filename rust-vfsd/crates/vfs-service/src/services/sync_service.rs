@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use vfs_core::error::{AppError, AppResult};
 use vfs_core::models::{
-    ConflictResolution, SyncChange, SyncConflict, SyncCursor,
+    ConflictResolution, SyncChange, SyncConflict,
 };
 use vfs_core::utils::CryptoUtils;
 use vfs_storage::{CachedDatabase, FileStore};
@@ -97,7 +97,7 @@ impl SyncService {
     async fn process_merged_content(
         &self,
         user_id: Uuid,
-        conflict: &SyncConflict,
+        _conflict: &SyncConflict,
         content_base64: &str,
     ) -> AppResult<()> {
         use base64::Engine as _;

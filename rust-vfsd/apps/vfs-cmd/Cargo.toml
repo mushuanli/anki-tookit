@@ -2,6 +2,7 @@
 [package]
 name = "vfs-cmd"
 version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "vfs"
@@ -24,3 +25,4 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+chrono = { workspace = true }

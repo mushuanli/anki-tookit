@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 use vfs_core::error::{AppError, AppResult};
-use vfs_core::models::{User, UserResponse, CreateUserRequest, UpdateUserRequest};
+use vfs_core::models::{User, CreateUserRequest, UpdateUserRequest};
 use vfs_core::utils::CryptoUtils;
 use vfs_storage::CachedDatabase;
 

@@ -3,10 +3,9 @@
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use uuid::Uuid;
 
 use vfs_core::config::Config;
-use vfs_core::models::{CreateUserRequest, User};
+use vfs_core::models::{CreateUserRequest};
 use vfs_core::utils::CryptoUtils;
 use vfs_service::{ServerBuilder, UserService};
 use vfs_storage::{Database, CacheService, CacheServiceConfig, CachedDatabase};
@@ -107,7 +106,7 @@ struct CliHandler {
 }
 
 impl CliHandler {
-    async fn new(config: &Config) -> anyhow::Result<Self> {
+    async fn new(config: Arc<Config>) -> anyhow::Result<Self> {
         let db = Database::new(&config.database).await?;
         db.run_migrations().await?;
         
@@ -275,13 +274,13 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         // 用户管理命令
         Some(Commands::User(user_cmd)) => {
-            let handler = CliHandler::new(&config).await?;
+            let handler = CliHandler::new(config.clone()).await?;
             handler.handle_user_command(user_cmd).await?;
         }
         
         // 数据库管理命令
         Some(Commands::Db(db_cmd)) => {
-            let handler = CliHandler::new(&config).await?;
+            let handler = CliHandler::new(config.clone()).await?;
             handler.handle_db_command(db_cmd).await?;
         }
         

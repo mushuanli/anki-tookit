@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use vfs_core::config::Config;
 use vfs_core::error::{AppError, AppResult};
-use vfs_core::models::{PermissionLevel, User, UserResponse};
+use vfs_core::models::{PermissionLevel, User};
 use vfs_core::utils::CryptoUtils;
 use vfs_storage::CachedDatabase;
 
