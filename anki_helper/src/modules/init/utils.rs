@@ -9,6 +9,27 @@ use std::path::{Path};
 use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
+use std::sync::Arc;
+use lazy_static::lazy_static;
+
+// --- 全局配置 ---
+
+lazy_static! {
+    // 限制同时运行的音频编码进程数量，避免 CPU 100% 导致异步运行时卡死
+    // 建议设置为 4 或 CPU 核心数
+    static ref AUDIO_PROCESS_SEMAPHORE: Arc<Semaphore> = Arc::new(Semaphore::new(4));
+}
+
+/// 统一的文件名清洗函数：全项目应保持一致
+/// 逻辑：去首尾星号、转小写、非字母数字替换为下划线
+pub fn get_safe_base_name(word: &str) -> String {
+    let s = word.trim_start_matches('*').trim().to_lowercase();
+    s.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+}
+
 
 /// 确保所有需要的子目录都存在
 pub async fn ensure_directories(output_dir: &Path) -> Result<()> {
@@ -52,60 +73,26 @@ pub async fn ai_chat(client: &Client, word: &str) -> Result<WordData> {
         }
     ]);
 
-    // --- 调试请求 ---
-    // 1. 将请求的 Body 构建到一个变量中
-    let request_body = json!({
-        "model": config::openai_model(),
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 8000,
-    });
-
-    // 2. 使用 dbg! 打印请求的各个部分
-    println!("\n--- [DEBUG] 准备发送 HTTP 请求 ---");
-    dbg!(config::openai_base_url()); // 打印请求 URL
-    // 注意：为了安全，不建议在日志中打印完整的API密钥。这里只打印一个标记。
-    dbg!(format!("Authorization: Bearer {}...", &config::openai_api_key().chars().take(8).collect::<String>()));
-    dbg!(&request_body); // 打印请求体 (Body)
-    println!("-------------------------------------\n");
-
-    // 3. 发送请求，但暂时不直接解析响应体，以获取完整的响应对象
-    let response_object = client
+    let response = client
         .post(config::openai_base_url())
         .bearer_auth(config::openai_api_key())
-        .json(&request_body)
+        .json(&json!({
+            "model": config::openai_model(),
+            "messages": messages,
+            "temperature": 0.7,
+        }))
         .send()
-        .await
-        .context("发送HTTP请求到AI服务失败")?;
+        .await?
+        .json::<Value>()
+        .await?;
 
-    // --- 调试响应 ---
-    // 4. 使用 dbg! 打印响应的状态码和头信息
-    println!("\n--- [DEBUG] 收到 HTTP 响应 ---");
-    dbg!(response_object.status());
-    dbg!(response_object.headers());
-
-    // 5. 将响应体解析为 JSON。这一步会消耗掉响应对象，因此放在最后。
-    //    然后打印解析后的 JSON Body。
-    let response_json: Value = response_object
-        .json()
-        .await
-        .context("解析AI响应体为JSON失败")?;
-
-    dbg!(&response_json);
-    println!("--------------------------------\n");
-
-    // 6. 从我们刚刚打印的 `response_json` 变量中提取内容
-    let content = response_json["choices"][0]["message"]["content"]
+    let content = response["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| anyhow!("AI响应中缺少内容"))?;
+        .ok_or_else(|| anyhow!("AI响应内容为空"))?;
 
-    // --- 新增: 清洗 AI 返回的内容 ---
-    // 这个步骤提高了代码的健壮性，可以处理被 Markdown 代码块包裹的 JSON。
-    let clean_content = extract_json_from_markdown(content);
-    
-    // --- 修改: 使用清洗后的内容进行解析 ---
-    let mut word_data: WordData = serde_json::from_str(clean_content)
-        .with_context(|| format!("解析AI返回的JSON失败: {}", clean_content))?;
+    let clean_json = extract_json_from_markdown(content);
+    let mut word_data: WordData = serde_json::from_str(clean_json)
+        .with_context(|| format!("解析AI JSON失败: {}", clean_json))?;
     
     if word_data.name.is_none() {
         word_data.name = Some(word.to_string());
@@ -114,56 +101,147 @@ pub async fn ai_chat(client: &Client, word: &str) -> Result<WordData> {
     Ok(word_data)
 }
 
-/// 生成音频文件
+/// 生成音频文件 (增加并发控制与静默模式)
 pub async fn generate_audio(text: &str, file_path: &Path) -> Result<String> {
     if text.is_empty() {
-        return Err(anyhow!("无法为\"空文本\"生成音频"));
+        return Err(anyhow!("文本为空"));
     }
 
+    // 1. 获取信号量许可，限制 CPU 负载
+    let _permit = AUDIO_PROCESS_SEMAPHORE.acquire().await?;
+
     let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string();
-    let mut command_status;
+    
+    // 2. 如果文件物理存在且大小不为0，跳过生成 (幂等性)
+    if file_path.exists() && fs::metadata(file_path).await?.len() > 0 {
+        return Ok(file_name);
+    }
+
+    // 3. 准备清洗后的文本（去掉双引号，防止 shell 注入或挂起）
+    let safe_text = text.replace('"', "");
 
     if cfg!(target_os = "macos") {
         let aiff_path = file_path.with_extension("aiff");
-        // Step 1: say to .aiff
-        command_status = Command::new("say")
+        
+        // 调用 macOS 自带 TTS
+        let say_status = Command::new("say")
             .arg("-o")
             .arg(&aiff_path)
-            .arg(text)
+            .arg("--")
+            .arg(&safe_text)
             .status()
             .await?;
-        if !command_status.success() {
+        
+        if !say_status.success() {
             return Err(anyhow!("'say' 命令执行失败"));
         }
-        // Step 2: lame to .mp3
-        command_status = Command::new("lame")
+
+        // 调用 LAME 编码。--silent 解决控制台阻塞问题，-q 2 保证质量
+        let lame_status = Command::new("lame")
+            .arg("--silent")
+            .arg("-q")
+            .arg("2")
             .arg(&aiff_path)
             .arg(file_path)
             .status()
             .await?;
-        // Clean up .aiff
-        fs::remove_file(aiff_path).await.ok();
+
+        let _ = fs::remove_file(aiff_path).await;
+
+        if !lame_status.success() {
+            return Err(anyhow!("'lame' 编码失败"));
+        }
     } else {
-        // Use edge-tts on other systems
-        command_status = Command::new("edge-tts")
+        // 其他系统使用 edge-tts
+        let status = Command::new("edge-tts")
             .arg("--write-media")
             .arg(file_path)
             .arg("--text")
-            .arg(text)
+            .arg(&safe_text)
             .status()
             .await?;
+        if !status.success() { return Err(anyhow!("edge-tts 失败")); }
     }
 
-    if command_status.success() {
-        println!("成功生成音频: {}", file_path.display());
-        Ok(file_name)
-    } else {
-        Err(anyhow!("音频生成命令失败: {}", text))
-    }
+    println!("生成音频成功: {}", file_name);
+    Ok(file_name)
 }
 
+/// 统一处理单个单词的多媒体生成
+pub async fn generate_multimedia_for_word(
+    client: &Client,
+    word_data: &mut WordData,
+    output_dir: &Path,
+) -> Result<bool> {
+    let mut needs_update = false;
+    let word_name = word_data.name.as_deref().unwrap_or_default();
+    if word_name.is_empty() { return Ok(false); }
 
-/// 提交图片生成任务
+    // 使用统一的清洗逻辑生成文件名
+    let safe_base_name = get_safe_base_name(word_name);
+
+    // --- 1. 处理单词发音 ---
+    let audio_name = format!("{}.mp3", safe_base_name);
+    let audio_path = output_dir.join(config::AUDIO_DIR).join(&audio_name);
+    
+    // 检查是否需要生成：JSON记录缺失 或 磁盘文件缺失
+    if word_data.audio.is_none() || !audio_path.exists() {
+        if let Ok(fname) = generate_audio(word_name, &audio_path).await {
+            word_data.audio = Some(fname);
+            needs_update = true;
+        }
+    }
+    
+    // --- 2. 处理例句音频 ---
+    if let Some(example_en) = word_data.example_en.as_deref() {
+        let ex_audio_name = format!("{}_example.mp3", safe_base_name);
+        let ex_audio_path = output_dir.join(config::AUDIO_DIR).join(&ex_audio_name);
+        
+        if word_data.audio_example.is_none() || !ex_audio_path.exists() {
+            if let Ok(fname) = generate_audio(example_en, &ex_audio_path).await {
+                word_data.audio_example = Some(fname);
+                needs_update = true;
+            }
+        }
+    }
+
+    // --- 3. 处理图片生成 ---
+    if word_data.image.is_none() {
+        let img_name = format!("{}.png", safe_base_name);
+        let img_path = output_dir.join(config::IMAGE_DIR).join(&img_name);
+
+        if let Some(task_id) = word_data.image_taskid.as_deref() {
+            match query_and_download_image(client, task_id, &img_path).await {
+                Ok(Some(filename)) => {
+                    word_data.image_taskid = None;
+                    if !filename.is_empty() { word_data.image = Some(filename); }
+                    needs_update = true;
+                },
+                Ok(None) => {}, // 任务进行中
+                Err(e) => eprintln!("查询图片失败: {}", e),
+            }
+        } else if let Some(prompt) = word_data.image_prompt.as_deref() {
+            if let Ok(task_id) = generate_image(client, prompt).await {
+                word_data.image_taskid = Some(task_id);
+                needs_update = true;
+                tokio::time::sleep(Duration::from_millis(config::IMAGE_GEN_DELAY_MS)).await;
+            }
+        }
+    }
+    
+    Ok(needs_update)
+}
+
+/// 辅助函数：从 AI 响应中提取 JSON
+fn extract_json_from_markdown(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("```json") && trimmed.ends_with("```") {
+        return trimmed.strip_prefix("```json").unwrap().strip_suffix("```").unwrap().trim();
+    }
+    trimmed
+}
+
+// 图片生成的辅助函数逻辑保持不变，但建议在调用处确保路径使用 safe_base_name (见上文)
 pub async fn generate_image(client: &Client, prompt: &str) -> Result<String> {
     let response = client
         .post(config::FLUX_API_GEN_URL)
@@ -197,13 +275,9 @@ pub async fn query_and_download_image(client: &Client, task_id: &str, file_path:
 
     match response["output"]["task_status"].as_str() {
         Some("SUCCEEDED") => {
-            let image_url = response["output"]["results"][0]["url"]
-                .as_str()
-                .ok_or_else(|| anyhow!("图片URL未找到"))?;
-            
-            let image_bytes = client.get(image_url).send().await?.bytes().await?;
-            fs::write(file_path, &image_bytes).await?;
-            println!("成功下载图片: {}", file_path.display());
+            let image_url = response["output"]["results"][0]["url"].as_str().ok_or_else(|| anyhow!("URL missing"))?;
+            let bytes = client.get(image_url).send().await?.bytes().await?;
+            fs::write(file_path, &bytes).await?;
             Ok(Some(file_path.file_name().unwrap().to_str().unwrap().to_string()))
         },
         Some("FAILED") => {
@@ -214,98 +288,4 @@ pub async fn query_and_download_image(client: &Client, task_id: &str, file_path:
             Ok(None) // 表示任务仍在进行中
         }
     }
-}
-
-/// 统一处理单个 WordData 对象的所有多媒体生成, 返回是否需要更新JSON文件
-pub async fn generate_multimedia_for_word(
-    client: &Client,
-    word_data: &mut WordData,
-    output_dir: &Path,
-) -> Result<bool> {
-    let mut needs_update = false;
-    let word_name = word_data.name.as_deref().unwrap_or_default();
-    if word_name.is_empty() { return Ok(false); }
-
-    // --- 处理音频 ---
-    if word_data.audio.is_none() {
-        let file_path = output_dir.join(config::AUDIO_DIR).join(format!("{}.mp3", word_name));
-        if let Ok(filename) = generate_audio(word_name, &file_path).await {
-            word_data.audio = Some(filename);
-            needs_update = true;
-        }
-    }
-    
-    // --- 处理例句音频 ---
-    if word_data.audio_example.is_none() {
-        if let Some(example_en) = word_data.example_en.as_deref() {
-             let file_path = output_dir.join(config::AUDIO_DIR).join(format!("{}_example.mp3", word_name));
-             if let Ok(filename) = generate_audio(example_en, &file_path).await {
-                 word_data.audio_example = Some(filename);
-                 needs_update = true;
-             }
-        }
-    }
-
-    // --- 处理图片 ---
-    if word_data.image.is_none() {
-        if let Some(task_id) = word_data.image_taskid.as_deref() {
-            // 已有任务ID，查询状态
-            let file_path = output_dir.join(config::IMAGE_DIR).join(format!("{}.png", word_name));
-            match query_and_download_image(client, task_id, &file_path).await {
-                Ok(Some(filename)) => { // 任务已结束（成功或失败）
-                    word_data.image_taskid = None; // 清除任务ID
-                    if !filename.is_empty() {
-                        word_data.image = Some(filename);
-                    }
-                    needs_update = true;
-                },
-                Ok(None) => {}, // 任务仍在进行中，什么都不做
-                Err(e) => eprintln!("查询图片任务失败: {}", e),
-            }
-        } else if let Some(prompt) = word_data.image_prompt.as_deref() {
-            // 没有任务ID，提交新任务
-            println!("为 '{}' 提交图片生成任务", word_name);
-            match generate_image(client, prompt).await {
-                Ok(task_id) => {
-                    word_data.image_taskid = Some(task_id);
-                    needs_update = true;
-                    // 等待一小段时间，避免立即查询导致API拥堵
-                    tokio::time::sleep(Duration::from_millis(config::IMAGE_GEN_DELAY_MS)).await;
-                },
-                Err(e) => eprintln!("提交图片生成任务失败: {}", e),
-            }
-        }
-    }
-    
-    Ok(needs_update)
-}
-
-
-// --- 新增: 辅助函数，用于从可能的 Markdown 代码块中提取纯 JSON 字符串 ---
-///
-/// 这个函数接收一个原始字符串，它可能是纯 JSON，也可能是被 ` ```json ... ``` ` 包裹的。
-/// 它会返回一个只包含潜在 JSON 内容的字符串切片，提高了对 AI 输出的容错性。
-///
-/// # Arguments
-/// * `raw_content` - 从 AI API 获取的原始字符串内容。
-///
-/// # Returns
-/// 一个字符串切片，指向 `raw_content` 中包含纯 JSON 的部分。
-fn extract_json_from_markdown(raw_content: &str) -> &str {
-    // 首先修剪两端的空白字符，这可以处理掉 AI 可能添加的多余换行符
-    let trimmed = raw_content.trim();
-
-    // 检查字符串是否同时以 ` ```json ` 开头并以 ` ``` ` 结尾
-    if trimmed.starts_with("```json") && trimmed.ends_with("```") {
-        // 如果是，就剥离掉这两个标记。
-        // 使用 .strip_prefix 和 .strip_suffix 是安全的方式。
-        // .unwrap() 在这里是安全的，因为我们已经用 .starts_with/.ends_with 检查过了。
-        let unwrapped = trimmed.strip_prefix("```json").unwrap().strip_suffix("```").unwrap();
-        
-        // 再次修剪，以移除 JSON 内容和 Markdown 标记之间的换行符
-        return unwrapped.trim();
-    }
-    
-    // 如果不符合 Markdown 块的特征，则假定它已经是纯 JSON，直接返回修剪后的字符串
-    trimmed
 }

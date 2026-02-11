@@ -24,3 +24,5 @@ zip = "0.6"
 rusqlite = { version = "0.25.4", features = ["bundled"] }
 tempfile = "3.8"
 zstd = "0.13.1"
+lazy_static = "1.4"
+
