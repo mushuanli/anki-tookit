@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Json;
@@ -14,33 +14,26 @@ use crate::AppState;
 
 pub fn build_router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
-        // Dashboard SPA
-        .route("/", get(index_html))
+        // WebSocket upgrade (must be before fallback)
         .route("/ws", get(crate::ws::ws_handler))
-        .route("/index.html", get(index_html))
-        // API: Hook events
+        // API routes
         .route("/api/hook-event", post(hook_event).put(update_hook_event))
         .route("/api/hook-event/{id}", put(update_hook_event_by_id))
-        // API: Clear
         .route("/api/clear", post(clear_all))
         .route("/api/clear-mcp", post(clear_mcp))
-        // API: MCP configuration
         .route("/api/mcp-destination", get(get_mcp_dest).put(set_mcp_dest))
-        // API: Health
         .route("/api/health", get(health))
-        // API: Sessions
         .route("/api/sessions", get(list_sessions))
         .route("/api/session/start", post(start_session))
         .route("/api/session/{id}", get(get_session))
         .route("/api/session/{id}/stop", post(stop_session))
         .route("/api/session/{id}/export", get(export_session))
-        // API: Request details
         .route("/api/request/{id}", get(get_request))
-        // API: Tee writer
         .route("/api/capture", post(toggle_capture))
         .route("/api/capture/status", get(capture_status))
-        // API: Request list
         .route("/api/requests", get(list_requests))
+        // Static files + SPA fallback
+        .fallback(get(serve_static))
         .with_state(state)
 }
 
@@ -50,17 +43,31 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
 #[folder = "../../wwwroot/"]
 struct WwwRoot;
 
-async fn index_html() -> Response<Body> {
-    match WwwRoot::get("index.html") {
-        Some(file) => Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/html; charset=utf-8")
-            .body(Body::from(file.data.into_owned()))
-            .unwrap(),
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("index.html not found"))
-            .unwrap(),
+async fn serve_static(uri: Uri) -> Response<Body> {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match WwwRoot::get(path) {
+        Some(file) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", mime.as_ref())
+                .body(Body::from(file.data.into_owned()))
+                .unwrap()
+        }
+        // SPA fallback: return index.html for unknown paths
+        None => match WwwRoot::get("index.html") {
+            Some(file) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/html; charset=utf-8")
+                .body(Body::from(file.data.into_owned()))
+                .unwrap(),
+            None => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("Not found"))
+                .unwrap(),
+        },
     }
 }
 
@@ -380,21 +387,17 @@ async fn toggle_capture(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CaptureToggle>,
 ) -> impl IntoResponse {
-    state.tee_enabled.store(
-        payload.enabled,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    state.tee_writer.set_enabled(payload.enabled);
+    if payload.enabled {
+        let _ = state.tee_writer.start_new_file().await;
+    }
     let _ = state.broadcast_send(WsMessage::TeeStatusChanged {
         enabled: payload.enabled,
     });
-    if payload.enabled {
-        // Create captures directory if it doesn't exist
-        let _ = tokio::fs::create_dir_all("captures").await;
-    }
     Json(serde_json::json!({"ok": true, "enabled": payload.enabled}))
 }
 
 async fn capture_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.tee_enabled.load(std::sync::atomic::Ordering::Relaxed);
+    let enabled = state.tee_writer.is_enabled();
     Json(serde_json::json!({"enabled": enabled}))
 }

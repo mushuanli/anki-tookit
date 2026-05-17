@@ -1,5 +1,6 @@
 [package]
 name = "proxy-server"
+default-run = "proxy-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -27,3 +28,6 @@ mime_guess = "2"
 toml = "0.8"
 tokio-stream = "0.1"
 anyhow = "1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
