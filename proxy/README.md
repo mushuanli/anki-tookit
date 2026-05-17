@@ -64,9 +64,15 @@ ls target/release/hook-agent         # Hook CLI
 **拦截 Anthropic API：**
 
 ```bash
+# 只需改 API 目标地址，API Key 照常配置
 export ANTHROPIC_BASE_URL="http://localhost:8888"
 # 或 source 项目中的 EnableProxy.sh
 ```
+
+> **不需要另外配置 API Key**。代理不接触认证信息——Claude Code 正常携带
+> `x-api-key` header，代理原样转发到 `api.anthropic.com`，并在仪表盘中自动脱敏为 `[REDACTED]`。
+>
+> 上游目标地址由代理侧的 `config.toml` 中 `api_target` 控制（默认 `https://api.anthropic.com`）。
 
 **拦截 MCP 调用：**
 
