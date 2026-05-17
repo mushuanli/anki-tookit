@@ -64,7 +64,7 @@ ls target/release/hook-agent         # Hook CLI
 **拦截 Anthropic API：**
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8888
+export ANTHROPIC_BASE_URL="http://localhost:8888"
 # 或 source 项目中的 EnableProxy.sh
 ```
 
