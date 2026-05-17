@@ -4,17 +4,17 @@ mod proxy;
 mod tee;
 mod ws;
 
-use proxy_core::RingBuffer;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tracing_subscriber::EnvFilter;
 
 use proxy_core::config::AppConfig;
 use proxy_core::models::{HookEvent, ProxiedRequest, Session, WsMessage};
+use proxy_core::RingBuffer;
+use tee::TeeWriter;
 
 pub struct AppState {
     pub config: AppConfig,
@@ -22,8 +22,9 @@ pub struct AppState {
     pub hook_store: RingBuffer<HookEvent>,
     pub mcp_store: RingBuffer<ProxiedRequest>,
     pub mcp_destination: RwLock<Option<String>>,
+    pub upstream_target: RwLock<String>,
     pub sessions: RwLock<Vec<Session>>,
-    pub tee_enabled: AtomicBool,
+    pub tee_writer: TeeWriter,
     pub broadcaster: broadcast::Sender<WsMessage>,
     pub client: reqwest::Client,
 }
@@ -31,13 +32,16 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
         let (tx, _rx) = broadcast::channel(256);
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upstream = config.proxy.api_target.clone();
         Self {
             request_store: RingBuffer::new(config.proxy.request_store_capacity),
             hook_store: RingBuffer::new(config.proxy.hook_store_capacity),
             mcp_store: RingBuffer::new(config.proxy.mcp_store_capacity),
             mcp_destination: RwLock::new(None),
+            upstream_target: RwLock::new(upstream),
             sessions: RwLock::new(Vec::new()),
-            tee_enabled: AtomicBool::new(false),
+            tee_writer: TeeWriter::new(enabled, PathBuf::from("captures")),
             broadcaster: tx,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(600))

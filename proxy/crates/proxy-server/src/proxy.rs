@@ -265,8 +265,9 @@ async fn handle_reverse_proxy(
         captured.max_tokens = json.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
     }
 
-    // Build upstream URL
-    let upstream_url = format!("{}{}", state.config.proxy.api_target, uri.path());
+    // Build upstream URL from dynamic config
+    let upstream_base = state.upstream_target.read().await.clone();
+    let upstream_url = format!("{}{}", upstream_base, uri.path());
 
     // Build upstream request
     let upstream_req = match state

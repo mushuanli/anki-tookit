@@ -22,6 +22,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/api/clear", post(clear_all))
         .route("/api/clear-mcp", post(clear_mcp))
         .route("/api/mcp-destination", get(get_mcp_dest).put(set_mcp_dest))
+        .route("/api/upstream", get(get_upstream).put(set_upstream))
         .route("/api/health", get(health))
         .route("/api/sessions", get(list_sessions))
         .route("/api/session/start", post(start_session))
@@ -191,6 +192,28 @@ async fn set_mcp_dest(
         destination_url: new_dest,
     });
     Json(serde_json::json!({"ok": true}))
+}
+
+// ── Upstream target ──
+
+async fn get_upstream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let target = state.upstream_target.read().await.clone();
+    Json(serde_json::json!({"targetUrl": target}))
+}
+
+async fn set_upstream(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(url) = payload["targetUrl"].as_str() {
+        let url = url.trim_end_matches('/');
+        *state.upstream_target.write().await = url.to_string();
+        let _ = state.broadcast_send(WsMessage::UpstreamChanged {
+            target_url: url.to_string(),
+        });
+    }
+    let target = state.upstream_target.read().await.clone();
+    Json(serde_json::json!({"ok": true, "targetUrl": target}))
 }
 
 // ── Health ──

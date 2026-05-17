@@ -182,6 +182,7 @@ pub enum WsMessage {
     Cleared,
     McpCleared,
     McpConfigChanged { destination_url: Option<String> },
+    UpstreamChanged { target_url: String },
     History { requests: Vec<ProxiedRequest> },
     HookHistory { events: Vec<HookEvent> },
     McpHistory { requests: Vec<ProxiedRequest> },

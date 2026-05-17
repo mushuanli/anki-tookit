@@ -80,6 +80,9 @@ function handleMessage(msg) {
         case 'SessionStopped':
             updateSessionCard(msg.payload);
             break;
+        case 'UpstreamChanged':
+            document.getElementById('upstream-target').value = msg.payload.target_url;
+            break;
         case 'TeeStatusChanged':
             captureEnabled = msg.payload.enabled;
             updateCaptureButton();
@@ -306,6 +309,25 @@ function renderHookTable(events) {
     tbody.innerHTML = '';
     events.forEach(e => addHookRow(e));
 }
+
+// ── Upstream target ──
+document.getElementById('btn-set-upstream').addEventListener('click', async () => {
+    const url = document.getElementById('upstream-target').value.trim();
+    if (!url) return;
+    await fetch('/api/upstream', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUrl: url })
+    });
+});
+
+fetch('/api/upstream')
+    .then(r => r.json())
+    .then(data => {
+        if (data.targetUrl) {
+            document.getElementById('upstream-target').value = data.targetUrl;
+        }
+    });
 
 // ── MCP destination ──
 document.getElementById('btn-set-mcp').addEventListener('click', async () => {
