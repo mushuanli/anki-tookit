@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coding Agent Explorer</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Coding Agent Explorer</h1>
+        <nav>
+            <a href="#" data-view="inspector" class="active">Inspector</a>
+            <a href="#" data-view="conversation">Conversation</a>
+            <a href="#" data-view="mcp">MCP Observer</a>
+            <a href="#" data-view="hooks">Hooks</a>
+            <a href="#" data-view="sessions">Sessions</a>
+        </nav>
+        <div class="status-bar">
+            <span id="connection-status" class="disconnected">Disconnected</span>
+            <span id="request-count">0 requests</span>
+            <span id="capture-status"></span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Inspector View -->
+        <section id="view-inspector" class="view active">
+            <div class="toolbar">
+                <button id="btn-clear">Clear All</button>
+                <button id="btn-clear-mcp">Clear MCP</button>
+                <button id="btn-toggle-capture">Start Capture</button>
+                <select id="filter-model">
+                    <option value="">All Models</option>
+                </select>
+            </div>
+            <div class="table-container">
+                <table id="requests-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Method</th>
+                            <th>Path</th>
+                            <th>Status</th>
+                            <th>Model</th>
+                            <th>Stream</th>
+                            <th>Tokens In</th>
+                            <th>Tokens Out</th>
+                            <th>Duration</th>
+                            <th>TTFT</th>
+                        </tr>
+                    </thead>
+                    <tbody id="requests-tbody"></tbody>
+                </table>
+            </div>
+            <div id="request-detail" class="detail-panel hidden">
+                <div class="detail-header">
+                    <h3 id="detail-title">Request Detail</h3>
+                    <button id="btn-close-detail">×</button>
+                </div>
+                <div class="detail-tabs">
+                    <button class="tab active" data-tab="request">Request</button>
+                    <button class="tab" data-tab="response">Response</button>
+                    <button class="tab" data-tab="sse">SSE Events</button>
+                </div>
+                <pre id="detail-content" class="detail-body"></pre>
+            </div>
+        </section>
+
+        <!-- Conversation View -->
+        <section id="view-conversation" class="view">
+            <div class="toolbar">
+                <button id="btn-conv-clear">Clear</button>
+                <select id="conv-filter">
+                    <option value="all">All Messages</option>
+                </select>
+            </div>
+            <div id="conversation-timeline" class="timeline"></div>
+        </section>
+
+        <!-- MCP Observer View -->
+        <section id="view-mcp" class="view">
+            <div class="toolbar">
+                <label>MCP Destination:</label>
+                <input type="text" id="mcp-destination" placeholder="e.g. https://gitmcp.io/user/repo" size="50">
+                <button id="btn-set-mcp">Set Destination</button>
+                <button id="btn-clear-mcp-view">Clear</button>
+            </div>
+            <div class="table-container">
+                <table id="mcp-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Method</th>
+                            <th>Status</th>
+                            <th>Request Body</th>
+                            <th>Response Body</th>
+                        </tr>
+                    </thead>
+                    <tbody id="mcp-tbody"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Hooks View -->
+        <section id="view-hooks" class="view">
+            <div class="toolbar">
+                <button id="btn-clear-hooks">Clear Hooks</button>
+            </div>
+            <div class="table-container">
+                <table id="hooks-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Event</th>
+                            <th>Session</th>
+                            <th>CWD</th>
+                            <th>Exit Code</th>
+                        </tr>
+                    </thead>
+                    <tbody id="hooks-tbody"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Sessions View -->
+        <section id="view-sessions" class="view">
+            <div class="toolbar">
+                <label>Label:</label>
+                <input type="text" id="session-label" placeholder="e.g. debug auth flow" size="30">
+                <button id="btn-start-session">Start Recording</button>
+            </div>
+            <div id="sessions-list"></div>
+            <div id="session-export" class="hidden">
+                <h3>Export Session</h3>
+                <button class="export-btn" data-format="json">Export JSON</button>
+                <button class="export-btn" data-format="har">Export HAR</button>
+                <button class="export-btn" data-format="markdown">Export Markdown</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

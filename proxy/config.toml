@@ -1,0 +1,14 @@
+[proxy]
+api_target = "https://api.anthropic.com"
+request_store_capacity = 1000
+mcp_store_capacity = 500
+hook_store_capacity = 1000
+
+[server]
+http_port = 5000
+proxy_port = 8888
+mcp_proxy_port = 9999
+listen_address = "127.0.0.1"
+
+[logging]
+level = "info"
