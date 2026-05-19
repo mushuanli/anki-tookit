@@ -7,16 +7,64 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
 }
 
+/// A named upstream API target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamTarget {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
-    #[serde(default = "default_api_target")]
+    // legacy field — migrated into upstreams on startup
+    #[serde(default)]
     pub api_target: String,
+
+    #[serde(default)]
+    pub active_upstream: String,
+
+    #[serde(default)]
+    pub upstreams: Vec<UpstreamTarget>,
+
     #[serde(default = "default_request_capacity")]
     pub request_store_capacity: usize,
     #[serde(default = "default_mcp_capacity")]
     pub mcp_store_capacity: usize,
     #[serde(default = "default_hook_capacity")]
     pub hook_store_capacity: usize,
+}
+
+impl ProxyConfig {
+    /// Run once at startup: migrate legacy `api_target` into the upstreams list.
+    pub fn migrate(&mut self) {
+        if self.upstreams.is_empty() && !self.api_target.is_empty() {
+            self.upstreams.push(UpstreamTarget {
+                name: "default".into(),
+                url: self.api_target.trim_end_matches('/').to_string(),
+                token: None,
+            });
+            self.active_upstream = "default".into();
+            self.api_target.clear();
+        }
+        // Ensure active_upstream points to a valid upstream
+        if !self.upstreams.iter().any(|u| u.name == self.active_upstream) {
+            self.active_upstream = self
+                .upstreams
+                .first()
+                .map(|u| u.name.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    pub fn active_upstream_url(&self) -> String {
+        self.upstreams
+            .iter()
+            .find(|u| u.name == self.active_upstream)
+            .map(|u| u.url.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,9 +85,6 @@ pub struct LoggingConfig {
     pub level: String,
 }
 
-fn default_api_target() -> String {
-    "https://api.anthropic.com".into()
-}
 fn default_request_capacity() -> usize {
     1000
 }
@@ -69,7 +114,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             proxy: ProxyConfig {
-                api_target: default_api_target(),
+                api_target: String::new(),
+                active_upstream: String::new(),
+                upstreams: Vec::new(),
                 request_store_capacity: default_request_capacity(),
                 mcp_store_capacity: default_mcp_capacity(),
                 hook_store_capacity: default_hook_capacity(),

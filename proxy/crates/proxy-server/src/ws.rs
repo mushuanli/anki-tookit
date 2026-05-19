@@ -52,6 +52,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let _ = sender.send(Message::Text(json.into())).await;
     }
 
+    // Push current upstream list
+    let upstream_msg = serde_json::to_string(&WsMessage::UpstreamChanged {
+        active_url: state.upstream_target.read().await.clone(),
+        upstreams: state.upstream_info_list().await,
+    })
+    .ok();
+    if let Some(json) = upstream_msg {
+        let _ = sender.send(Message::Text(json.into())).await;
+    }
+
     // Subscribe to broadcast
     let mut broadcast_rx = state.broadcast_subscribe();
 

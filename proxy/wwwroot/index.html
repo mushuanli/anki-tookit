@@ -28,8 +28,18 @@
         <section id="view-inspector" class="view active">
             <div class="toolbar">
                 <label>Upstream:</label>
-                <input type="text" id="upstream-target" placeholder="https://api.anthropic.com" size="40">
-                <button id="btn-set-upstream">Set</button>
+                <select id="upstream-select"></select>
+                <button id="btn-upstream-add" title="Add">+</button>
+                <button id="btn-upstream-edit" title="Edit">&#9998;</button>
+                <button id="btn-upstream-delete" title="Delete" disabled>&#10005;</button>
+                <span id="upstream-url-display" class="upstream-url"></span>
+                <div id="upstream-edit-form" class="inline-edit hidden">
+                    <input type="text" id="upstream-edit-name" placeholder="Name" size="12">
+                    <input type="text" id="upstream-edit-url" placeholder="https://..." size="36">
+                    <input type="password" id="upstream-edit-token" placeholder="Token (optional)" size="22">
+                    <button id="btn-upstream-save">Save</button>
+                    <button id="btn-upstream-cancel">Cancel</button>
+                </div>
                 <span class="sep">|</span>
                 <button id="btn-clear">Clear All</button>
                 <button id="btn-clear-mcp">Clear MCP</button>

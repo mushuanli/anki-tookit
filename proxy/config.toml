@@ -1,14 +1,22 @@
+[logging]
+level = "info"
+
 [proxy]
-api_target = "https://api.anthropic.com"
-request_store_capacity = 1000
-mcp_store_capacity = 500
+active_upstream = "deepseek"
 hook_store_capacity = 1000
+mcp_store_capacity = 500
+request_store_capacity = 1000
+
+[[proxy.upstreams]]
+name = "deepseek"
+url = "https://api.deepseek.com/anthropic"
+
+[[proxy.upstreams]]
+name = "anthropic"
+url = "https://api.anthropic.com"
 
 [server]
 http_port = 5000
-proxy_port = 8888
-mcp_proxy_port = 9999
 listen_address = "127.0.0.1"
-
-[logging]
-level = "info"
+mcp_proxy_port = 9999
+proxy_port = 8888

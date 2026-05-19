@@ -83,10 +83,20 @@ impl SseParser {
     }
 
     /// Extract content block delta text (for displaying in conversation view).
+    /// Handles both `text_delta` and `thinking_delta` types.
     pub fn delta_text<'a>(&self, data: &'a Value) -> Option<&'a str> {
-        data.get("delta")
-            .and_then(|d| d.get("text"))
-            .and_then(|t| t.as_str())
+        let delta = data.get("delta").and_then(|d| d.get("type"))?;
+        match delta.as_str()? {
+            "text_delta" => data
+                .get("delta")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str()),
+            "thinking_delta" => data
+                .get("delta")
+                .and_then(|d| d.get("thinking"))
+                .and_then(|t| t.as_str()),
+            _ => None,
+        }
     }
 
     /// Extract usage info from message_delta event.

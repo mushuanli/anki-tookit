@@ -81,7 +81,7 @@ function handleMessage(msg) {
             updateSessionCard(msg.payload);
             break;
         case 'UpstreamChanged':
-            document.getElementById('upstream-target').value = msg.payload.target_url;
+            populateUpstreamDropdown(msg.payload.upstreams, msg.payload.active_url);
             break;
         case 'TeeStatusChanged':
             captureEnabled = msg.payload.enabled;
@@ -174,6 +174,8 @@ function renderRequestTable(requests) {
 
 function showRequestDetail(req) {
     selectedRequestId = req.id;
+    const content = document.getElementById('detail-content');
+    delete content.dataset.streamStarted;
     document.getElementById('request-detail').classList.remove('hidden');
     document.getElementById('detail-title').textContent = `${req.method} ${req.path}`;
 
@@ -200,18 +202,49 @@ function showDetailTab(tab, req) {
             content.textContent = formatHeaders(req.response_headers) + '\n\n' + (req.response_body || '');
             break;
         case 'sse':
-            content.textContent = req.sse_events.map(e =>
-                `event: ${e.event_type || '—'}\ndata: ${e.data || '—'}`
-            ).join('\n\n');
+            content.textContent = formatSseContent(req);
             break;
     }
+}
+
+function formatSseContent(req) {
+    const parts = [];
+    // Show merged content text first if available
+    if (req.content_text) {
+        parts.push('=== Response Content ===');
+        parts.push(req.content_text);
+    }
+    // Show structured events (filter out noisy delta events)
+    const structured = req.sse_events.filter(e => {
+        if (!e.data) return false;
+        try {
+            const d = JSON.parse(e.data);
+            const t = d.type;
+            return t === 'message_start' || t === 'message_delta' || t === 'message_stop'
+                || t === 'content_block_start' || t === 'content_block_stop'
+                || (t !== 'content_block_delta' && t !== 'ping');
+        } catch { return true; }
+    });
+    if (structured.length > 0) {
+        if (parts.length > 0) parts.push('');
+        parts.push('=== Events ===');
+        structured.forEach(e => {
+            parts.push(`event: ${e.event_type || '—'}\ndata: ${e.data || '—'}\n`);
+        });
+    }
+    return parts.join('\n');
 }
 
 function appendSseEvent(event) {
     const activeTab = document.querySelector('.detail-tabs .tab.active')?.dataset.tab;
     if (activeTab === 'sse') {
+        // Show streaming progress — will be replaced by merged content on RequestUpdated
         const content = document.getElementById('detail-content');
-        content.textContent += `\n\nevent: ${event.event_type || '—'}\ndata: ${event.data || '—'}`;
+        if (!content.dataset.streamStarted) {
+            content.dataset.streamStarted = '1';
+            content.textContent = '(streaming…)\n\n';
+        }
+        content.textContent += `event: ${event.event_type || '—'}\ndata: ${event.data || '—'}\n\n`;
         content.scrollTop = content.scrollHeight;
     }
 }
@@ -310,23 +343,130 @@ function renderHookTable(events) {
     events.forEach(e => addHookRow(e));
 }
 
-// ── Upstream target ──
-document.getElementById('btn-set-upstream').addEventListener('click', async () => {
-    const url = document.getElementById('upstream-target').value.trim();
-    if (!url) return;
-    await fetch('/api/upstream', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetUrl: url })
+// ── Upstream targets ──
+
+let upstreamEditMode = null; // 'add' | 'edit' (null = hidden)
+
+function populateUpstreamDropdown(list, activeUrl) {
+    const select = document.getElementById('upstream-select');
+    const display = document.getElementById('upstream-url-display');
+    const delBtn = document.getElementById('btn-upstream-delete');
+    select.innerHTML = '';
+
+    if (!list || list.length === 0) {
+        select.innerHTML = '<option value="">— none —</option>';
+        display.textContent = '';
+        delBtn.disabled = true;
+        return;
+    }
+
+    let activeName = '';
+    list.forEach((u, i) => {
+        const opt = document.createElement('option');
+        opt.value = u.name;
+        opt.textContent = u.name + (u.has_token ? ' \uD83D\uDD11' : '');
+        if (u.active) {
+            opt.selected = true;
+            activeName = u.name;
+            display.textContent = u.url + (u.has_token ? ' (has token)' : '');
+        }
+        select.appendChild(opt);
     });
+
+    delBtn.disabled = list.length <= 1;
+}
+
+// Dropdown change → activate
+document.getElementById('upstream-select').addEventListener('change', async () => {
+    const name = document.getElementById('upstream-select').value;
+    if (!name) return;
+    await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
 });
 
-fetch('/api/upstream')
+// Add button → show inline form
+document.getElementById('btn-upstream-add').addEventListener('click', () => {
+    upstreamEditMode = 'add';
+    document.getElementById('upstream-edit-name').value = '';
+    document.getElementById('upstream-edit-url').value = '';
+    document.getElementById('upstream-edit-token').value = '';
+    document.getElementById('upstream-edit-name').disabled = false;
+    document.getElementById('upstream-edit-form').classList.remove('hidden');
+    document.getElementById('upstream-edit-name').focus();
+});
+
+// Edit button → show inline form pre-filled
+document.getElementById('btn-upstream-edit').addEventListener('click', () => {
+    const select = document.getElementById('upstream-select');
+    const name = select.value;
+    if (!name) return;
+    const display = document.getElementById('upstream-url-display');
+    upstreamEditMode = 'edit';
+    document.getElementById('upstream-edit-name').value = name;
+    // display.textContent may include " (has token)" suffix — strip it
+    document.getElementById('upstream-edit-url').value = display.textContent.replace(' (has token)', '');
+    document.getElementById('upstream-edit-token').value = '';
+    document.getElementById('upstream-edit-token').placeholder = 'Token (unchanged if empty)';
+    document.getElementById('upstream-edit-name').disabled = true;
+    document.getElementById('upstream-edit-form').classList.remove('hidden');
+    document.getElementById('upstream-edit-url').focus();
+});
+
+// Save button
+document.getElementById('btn-upstream-save').addEventListener('click', async () => {
+    const nameInput = document.getElementById('upstream-edit-name');
+    const urlInput = document.getElementById('upstream-edit-url');
+    const tokenInput = document.getElementById('upstream-edit-token');
+    const name = nameInput.value.trim();
+    const url = urlInput.value.trim();
+    const token = tokenInput.value.trim();
+    if (!name || !url) return;
+
+    let resp;
+    if (upstreamEditMode === 'add') {
+        resp = await fetch('/api/upstreams', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, url, token: token || undefined })
+        });
+    } else {
+        const body = { url };
+        if (token) body.token = token;
+        resp = await fetch(`/api/upstreams/${encodeURIComponent(name)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+    }
+    if (resp.ok) {
+        hideUpstreamForm();
+    } else {
+        const err = await resp.json();
+        alert(err.error || 'Failed to save upstream');
+    }
+});
+
+// Cancel button
+document.getElementById('btn-upstream-cancel').addEventListener('click', hideUpstreamForm);
+
+function hideUpstreamForm() {
+    upstreamEditMode = null;
+    document.getElementById('upstream-edit-form').classList.add('hidden');
+}
+
+// Delete button
+document.getElementById('btn-upstream-delete').addEventListener('click', async () => {
+    const name = document.getElementById('upstream-select').value;
+    if (!name) return;
+    if (!confirm(`Delete upstream "${name}"?`)) return;
+    await fetch(`/api/upstreams/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    // UI updates via WS UpstreamChanged
+});
+
+// Initial load
+fetch('/api/upstreams')
     .then(r => r.json())
     .then(data => {
-        if (data.targetUrl) {
-            document.getElementById('upstream-target').value = data.targetUrl;
-        }
+        populateUpstreamDropdown(data.upstreams, data.activeUrl);
     });
 
 // ── MCP destination ──

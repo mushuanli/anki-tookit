@@ -48,6 +48,7 @@ pub struct ProxiedRequest {
     pub cache_read_input_tokens: Option<u32>,
     // Streaming
     pub sse_events: Vec<SseEvent>,
+    pub content_text: Option<String>, // merged content_block_delta text, for display
     // Timing
     pub duration_ms: Option<u64>,
     pub time_to_first_token_ms: Option<u64>,
@@ -77,6 +78,7 @@ impl ProxiedRequest {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             sse_events: Vec::new(),
+            content_text: None,
             duration_ms: None,
             time_to_first_token_ms: None,
             error: None,
@@ -169,6 +171,16 @@ impl Session {
     }
 }
 
+// ── Upstream info (for frontend) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamInfo {
+    pub name: String,
+    pub url: String,
+    pub active: bool,
+    pub has_token: bool,
+}
+
 // ── WebSocket message envelope ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,7 +194,10 @@ pub enum WsMessage {
     Cleared,
     McpCleared,
     McpConfigChanged { destination_url: Option<String> },
-    UpstreamChanged { target_url: String },
+    UpstreamChanged {
+        active_url: String,
+        upstreams: Vec<UpstreamInfo>,
+    },
     History { requests: Vec<ProxiedRequest> },
     HookHistory { events: Vec<HookEvent> },
     McpHistory { requests: Vec<ProxiedRequest> },

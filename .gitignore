@@ -1,3 +1,5 @@
+config.toml
+
 node_modules/
 target/
 .vite

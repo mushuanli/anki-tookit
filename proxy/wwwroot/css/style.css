@@ -325,3 +325,56 @@ td.status-5xx { color: var(--error); }
 }
 
 .hidden { display: none !important; }
+
+/* ── Upstream inline edit ── */
+.upstream-url {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-left: 4px;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.inline-edit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding: 4px 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.inline-edit input[type="text"],
+.inline-edit input[type="password"] {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+}
+
+#btn-upstream-add,
+#btn-upstream-edit,
+#btn-upstream-delete {
+    padding: 4px 8px;
+    font-size: 0.8rem;
+    min-width: 26px;
+}
+
+#btn-upstream-delete:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+#btn-upstream-delete:disabled:hover {
+    background: var(--bg-card);
+    border-color: var(--border);
+    color: var(--text);
+}

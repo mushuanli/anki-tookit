@@ -9,7 +9,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::BodyExt;
-use proxy_core::models::{ProxiedRequest, WsMessage};
+use proxy_core::models::{ProxiedRequest, SseEvent, WsMessage};
 use proxy_core::sse::SseParser;
 use tokio::net::TcpStream;
 use tokio_stream::wrappers::ReceiverStream;
@@ -20,9 +20,20 @@ use crate::AppState;
 
 const REDACTED_HEADERS: &[&str] = &["x-api-key", "authorization"];
 
+/// Headers dropped from capture output (noisy / uninformative for humans).
+const DROP_HEADERS: &[&str] = &[
+    "transfer-encoding",
+    "content-encoding",
+    "content-length",
+];
+
 fn redact_headers(headers: &HeaderMap) -> HashMap<String, String> {
     headers
         .iter()
+        .filter(|(k, _)| {
+            let key = k.as_str().to_lowercase();
+            !DROP_HEADERS.contains(&key.as_str())
+        })
         .map(|(k, v)| {
             let key = k.as_str().to_lowercase();
             let value = if REDACTED_HEADERS.contains(&key.as_str()) {
@@ -36,7 +47,12 @@ fn redact_headers(headers: &HeaderMap) -> HashMap<String, String> {
 }
 
 fn forward_headers(headers: &HeaderMap) -> HeaderMap {
+    build_upstream_headers(headers, None)
+}
+
+fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> HeaderMap {
     let mut fwd = HeaderMap::new();
+
     for (k, v) in headers.iter() {
         let key = k.as_str().to_lowercase();
         if key == "host"
@@ -48,9 +64,29 @@ fn forward_headers(headers: &HeaderMap) -> HeaderMap {
         {
             continue;
         }
+        // If we have an override token, skip client's auth headers
+        if override_token.is_some() && (key == "authorization" || key == "x-api-key") {
+            continue;
+        }
         fwd.insert(k.clone(), v.clone());
     }
     fwd.insert("accept-encoding", HeaderValue::from_static("identity"));
+
+    // Inject upstream token
+    if let Some(token) = override_token {
+        if token.starts_with("sk-") {
+            fwd.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            );
+        } else {
+            fwd.insert(
+                "x-api-key",
+                HeaderValue::from_str(token).unwrap(),
+            );
+        }
+    }
+
     fwd
 }
 
@@ -171,7 +207,7 @@ async fn handle_forward_proxy(
     // Build captured request
     let mut captured = ProxiedRequest::new(method.as_str(), path);
     captured.request_headers = redact_headers(&headers);
-    captured.request_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
+    captured.request_body = Some(pretty_json(&body_bytes));
 
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
         captured.model = json.get("model").and_then(|v| v.as_str()).map(String::from);
@@ -256,7 +292,7 @@ async fn handle_reverse_proxy(
     // Build captured request
     let mut captured = ProxiedRequest::new(method.as_str(), uri.path());
     captured.request_headers = redact_headers(&headers);
-    captured.request_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
+    captured.request_body = Some(pretty_json(&body_bytes));
 
     // Parse request body for metadata
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
@@ -269,11 +305,21 @@ async fn handle_reverse_proxy(
     let upstream_base = state.upstream_target.read().await.clone();
     let upstream_url = format!("{}{}", upstream_base, uri.path());
 
+    // Override auth if active upstream has its own token
+    let active_name = state.active_upstream.read().await.clone();
+    let upstream_token = {
+        let upstreams = state.upstreams.read().await;
+        upstreams
+            .iter()
+            .find(|u| u.name == active_name)
+            .and_then(|u| u.token.clone())
+    };
+
     // Build upstream request
     let upstream_req = match state
         .client
         .request(method.clone(), &upstream_url)
-        .headers(forward_headers(&headers))
+        .headers(build_upstream_headers(&headers, upstream_token.as_deref()))
         .body(body_bytes)
         .build()
     {
@@ -334,7 +380,7 @@ async fn handle_non_streaming_response(
 
     match upstream_resp.bytes().await {
         Ok(body_bytes) => {
-            captured.response_body = Some(String::from_utf8_lossy(&body_bytes).to_string());
+            captured.response_body = Some(pretty_json(&body_bytes));
             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                 captured.message_id = json
                     .get("id")
@@ -479,6 +525,7 @@ async fn handle_streaming_response(
 
         captured.response_body = Some(accumulated_body);
         captured.duration_ms = Some(start.elapsed().as_millis() as u64);
+        captured.content_text = merge_delta_text(&captured.sse_events);
 
         let _ = state_clone.request_store.push(captured.clone());
         let _ = state_clone.broadcast_send(WsMessage::RequestUpdated(captured.clone()));
@@ -497,6 +544,88 @@ async fn handle_streaming_response(
     }
     resp = resp.header("content-type", "text/event-stream");
     resp.body(body).unwrap()
+}
+
+/// Pretty-print JSON bytes, falling back to raw string on failure.
+fn pretty_json(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).to_string())
+}
+
+/// Merge content_block_delta text into a single readable string.
+fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
+    let parser = SseParser::new();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_type = "text".to_string();
+
+    for ev in events {
+        let data_str = ev.data.as_ref()?;
+        let parsed = parser.parse_message_data(data_str)?;
+
+        match parser.event_kind(&parsed) {
+            Some("content_block_start") => {
+                if !current.is_empty() {
+                    blocks.push(format_labeled(&current, &current_type));
+                }
+                current.clear();
+                current_type = parsed
+                    .get("content_block")
+                    .and_then(|cb| cb.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("text")
+                    .to_string();
+            }
+            Some("content_block_delta") => {
+                let delta = parsed.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str());
+                match delta {
+                    Some("thinking_delta") => {
+                        if let Some(t) = parsed.get("delta").and_then(|d| d.get("thinking")).and_then(|t| t.as_str()) {
+                            current.push_str(t);
+                        }
+                    }
+                    Some("text_delta") => {
+                        if let Some(t) = parsed.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
+                            current.push_str(t);
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(t) = parsed.get("delta").and_then(|d| d.get("partial_json")).and_then(|t| t.as_str()) {
+                            current.push_str(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("content_block_stop") => {
+                if !current.is_empty() {
+                    blocks.push(format_labeled(&current, &current_type));
+                }
+                current.clear();
+                current_type = "text".to_string();
+            }
+            _ => {}
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(format_labeled(&current, &current_type));
+    }
+
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n"))
+    }
+}
+
+fn format_labeled(text: &str, block_type: &str) -> String {
+    match block_type {
+        "thinking" => format!("[Thinking]\n{}", text.trim()),
+        "tool_use" => format!("[Tool Use]\n{}", text.trim()),
+        _ => text.trim().to_string(),
+    }
 }
 
 async fn record_in_sessions(state: &AppState) {

@@ -6,6 +6,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Json;
+use proxy_core::config::UpstreamTarget;
 use proxy_core::export::{export_har, export_json, export_markdown};
 use proxy_core::models::{HookEvent, Session, WsMessage};
 use serde::Deserialize;
@@ -18,18 +19,24 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/ws", get(crate::ws::ws_handler))
         // API routes
         .route("/api/hook-event", post(hook_event).put(update_hook_event))
-        .route("/api/hook-event/{id}", put(update_hook_event_by_id))
+        .route("/api/hook-event/:id", put(update_hook_event_by_id))
         .route("/api/clear", post(clear_all))
         .route("/api/clear-mcp", post(clear_mcp))
         .route("/api/mcp-destination", get(get_mcp_dest).put(set_mcp_dest))
         .route("/api/upstream", get(get_upstream).put(set_upstream))
+        .route("/api/upstreams", get(list_upstreams).post(add_upstream))
+        .route("/api/upstreams/:name/activate", post(activate_upstream))
+        .route(
+            "/api/upstreams/:name",
+            put(update_upstream).delete(delete_upstream),
+        )
         .route("/api/health", get(health))
         .route("/api/sessions", get(list_sessions))
         .route("/api/session/start", post(start_session))
-        .route("/api/session/{id}", get(get_session))
-        .route("/api/session/{id}/stop", post(stop_session))
-        .route("/api/session/{id}/export", get(export_session))
-        .route("/api/request/{id}", get(get_request))
+        .route("/api/session/:id", get(get_session))
+        .route("/api/session/:id/stop", post(stop_session))
+        .route("/api/session/:id/export", get(export_session))
+        .route("/api/request/:id", get(get_request))
         .route("/api/capture", post(toggle_capture))
         .route("/api/capture/status", get(capture_status))
         .route("/api/requests", get(list_requests))
@@ -194,26 +201,173 @@ async fn set_mcp_dest(
     Json(serde_json::json!({"ok": true}))
 }
 
-// ── Upstream target ──
+// ── Upstream targets ──
+
+/// Build UpstreamChanged message from current state.
+async fn upstream_changed_msg(state: &AppState) -> WsMessage {
+    WsMessage::UpstreamChanged {
+        active_url: state.upstream_target.read().await.clone(),
+        upstreams: state.upstream_info_list().await,
+    }
+}
 
 async fn get_upstream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let target = state.upstream_target.read().await.clone();
-    Json(serde_json::json!({"targetUrl": target}))
+    let url = state.upstream_target.read().await.clone();
+    let name = state.active_upstream.read().await.clone();
+    Json(serde_json::json!({"targetUrl": url, "name": name}))
 }
 
 async fn set_upstream(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(url) = payload["targetUrl"].as_str() {
-        let url = url.trim_end_matches('/');
-        *state.upstream_target.write().await = url.to_string();
-        let _ = state.broadcast_send(WsMessage::UpstreamChanged {
-            target_url: url.to_string(),
-        });
+    if let Some(input_url) = payload["targetUrl"].as_str() {
+        let input_url = input_url.trim_end_matches('/').to_string();
+        // Check if URL matches a named upstream → activate it
+        let upstreams = state.upstreams.read().await.clone();
+        if let Some(u) = upstreams.iter().find(|u| u.url == input_url) {
+            let name = u.name.clone();
+            drop(upstreams);
+            *state.active_upstream.write().await = name;
+            *state.upstream_target.write().await = input_url.clone();
+            state.persist_upstreams().await;
+            let msg = upstream_changed_msg(&state).await;
+            let _ = state.broadcast_send(msg);
+        } else {
+            // Ad-hoc: memory only, no persistence
+            *state.upstream_target.write().await = input_url.clone();
+            *state.active_upstream.write().await = String::new();
+            let msg = upstream_changed_msg(&state).await;
+            let _ = state.broadcast_send(msg);
+        }
     }
     let target = state.upstream_target.read().await.clone();
-    Json(serde_json::json!({"ok": true, "targetUrl": target}))
+    let name = state.active_upstream.read().await.clone();
+    Json(serde_json::json!({"ok": true, "targetUrl": target, "name": name}))
+}
+
+// ── Multi-upstream CRUD ──
+
+async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "upstreams": state.upstream_info_list().await,
+        "activeUrl": state.upstream_target.read().await.clone(),
+    }))
+}
+
+async fn add_upstream(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response<Body> {
+    let name = match payload["name"].as_str() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Name is required"}))).into_response(),
+    };
+    let url = match payload["url"].as_str() {
+        Some(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "URL is required"}))).into_response(),
+    };
+    let token = payload["token"].as_str().filter(|t| !t.is_empty()).map(|t| t.to_string());
+
+    let mut upstreams = state.upstreams.write().await;
+    if upstreams.iter().any(|u| u.name == name) {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("Upstream '{name}' already exists")}))).into_response();
+    }
+    upstreams.push(UpstreamTarget { name, url, token });
+    drop(upstreams);
+
+    state.persist_upstreams().await;
+    let msg = upstream_changed_msg(&state).await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+async fn update_upstream(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response<Body> {
+    let new_url = match payload["url"].as_str() {
+        Some(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "URL is required"}))).into_response(),
+    };
+    // token: if key is present, update (empty string = clear)
+    let token_update = payload.get("token").map(|v| {
+        v.as_str().filter(|t| !t.is_empty()).map(|t| t.to_string())
+    });
+
+    let mut upstreams = state.upstreams.write().await;
+    let is_active = state.active_upstream.read().await.clone() == name;
+    if let Some(u) = upstreams.iter_mut().find(|u| u.name == name) {
+        u.url = new_url.clone();
+        if let Some(ref tok) = token_update {
+            u.token = tok.clone();
+        }
+    } else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response();
+    }
+    drop(upstreams);
+
+    // Keep upstream_target in sync if this is the active upstream
+    if is_active {
+        *state.upstream_target.write().await = new_url;
+    }
+
+    state.persist_upstreams().await;
+    let msg = upstream_changed_msg(&state).await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+async fn delete_upstream(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response<Body> {
+    let mut upstreams = state.upstreams.write().await;
+    if upstreams.len() <= 1 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Cannot delete the only upstream"}))).into_response();
+    }
+
+    let idx = match upstreams.iter().position(|u| u.name == name) {
+        Some(i) => i,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response(),
+    };
+    let was_active = upstreams[idx].name == *state.active_upstream.read().await;
+    upstreams.remove(idx);
+
+    // If we deleted the active one, switch to the first remaining
+    if was_active {
+        let new_active = upstreams[0].clone();
+        *state.active_upstream.write().await = new_active.name.clone();
+        *state.upstream_target.write().await = new_active.url;
+    }
+    drop(upstreams);
+
+    state.persist_upstreams().await;
+    let msg = upstream_changed_msg(&state).await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+async fn activate_upstream(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response<Body> {
+    let upstreams = state.upstreams.read().await;
+    let target = match upstreams.iter().find(|u| u.name == name) {
+        Some(u) => u.clone(),
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response(),
+    };
+    drop(upstreams);
+
+    let url = target.url;
+    *state.active_upstream.write().await = name;
+    *state.upstream_target.write().await = url.clone();
+
+    state.persist_upstreams().await;
+    let msg = upstream_changed_msg(&state).await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true, "activeUrl": url})).into_response()
 }
 
 // ── Health ──
