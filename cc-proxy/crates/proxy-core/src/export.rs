@@ -86,7 +86,7 @@ pub fn export_har(_session: &Session, requests: &[ProxiedRequest]) -> Value {
         "log": {
             "version": "1.2",
             "creator": {
-                "name": "CodingAgentExplorer",
+                "name": "cc-proxy",
                 "version": env!("CARGO_PKG_VERSION")
             },
             "entries": entries

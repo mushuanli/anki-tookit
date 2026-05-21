@@ -196,15 +196,31 @@ function showDetailTab(tab, req) {
     const content = document.getElementById('detail-content');
     switch (tab) {
         case 'request':
-            content.textContent = formatHeaders(req.request_headers) + '\n\n' + (req.request_body || '');
+            content.innerHTML = renderDetailBody(formatHeaders(req.request_headers), req.request_body);
             break;
         case 'response':
-            content.textContent = formatHeaders(req.response_headers) + '\n\n' + (req.response_body || '');
+            content.innerHTML = renderDetailBody(formatHeaders(req.response_headers), req.response_body);
             break;
         case 'sse':
             content.textContent = formatSseContent(req);
             break;
     }
+}
+
+function renderDetailBody(headers, body) {
+    const parts = [];
+    if (headers) {
+        parts.push(`<pre class="detail-headers">${esc(headers)}</pre>`);
+    }
+    if (body) {
+        const parsed = tryParseJson(body);
+        if (parsed) {
+            parts.push(`<div class="json-tree">${jsonTreeHTML(parsed, 0)}</div>`);
+        } else {
+            parts.push(`<pre class="detail-plain">${esc(body)}</pre>`);
+        }
+    }
+    return parts.join('');
 }
 
 function formatSseContent(req) {
@@ -614,6 +630,127 @@ function formatTime(ts) {
 function formatHeaders(headers) {
     if (!headers) return '';
     return Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\n');
+}
+
+// ── JSON Tree Viewer ──
+const IMPORTANT_KEYS = ['role', 'type', 'name', 'id', 'model', 'status', 'stop_reason', 'index', 'tool_use_id'];
+
+function tryParseJson(str) {
+    if (!str || typeof str !== 'string') return null;
+    const trimmed = str.trim();
+    if ((trimmed.startsWith('{') || trimmed.startsWith('['))) {
+        try { return JSON.parse(trimmed); } catch (e) { return null; }
+    }
+    return null;
+}
+
+function jsonTreeHTML(value, depth) {
+    if (value === null) return '<span class="jt-null">null</span>';
+    if (typeof value === 'boolean') return `<span class="jt-bool">${value}</span>`;
+    if (typeof value === 'number') return `<span class="jt-number">${value}</span>`;
+    if (typeof value === 'string') return `<span class="jt-string">"${esc(value)}"</span>`;
+
+    if (Array.isArray(value)) {
+        if (value.length === 0) return '<span class="jt-bracket">[]</span>';
+        const collapsed = depth >= 2;
+        const preview = `[${value.length} item${value.length > 1 ? 's' : ''}]`;
+        const children = value.map((item, i) => {
+            const v = jsonTreeHTML(item, depth + 1);
+            return `<div class="jt-item"><span class="jt-index">${i}: </span>${v}</div>`;
+        }).join('');
+
+        return `<span class="jt-node jt-array">`
+            + `<span class="jt-toggle ${collapsed ? '' : 'expanded'}" data-depth="${depth}">${collapsed ? '+' : '-'}</span>`
+            + `<span class="jt-bracket">[</span>`
+            + `<span class="jt-preview ${collapsed ? '' : 'hidden'}">${esc(preview)}</span>`
+            + `<span class="jt-children ${collapsed ? 'hidden' : ''}">${children}</span>`
+            + `<span class="jt-bracket">]</span>`
+            + `</span>`;
+    }
+
+    if (typeof value === 'object') {
+        const keys = Object.keys(value);
+        if (keys.length === 0) return '<span class="jt-bracket">{}</span>';
+        const collapsed = depth >= 2;
+
+        // Build preview from important keys
+        const previewParts = [];
+        for (const k of IMPORTANT_KEYS) {
+            if (k in value) {
+                const v = value[k];
+                if (typeof v === 'string') {
+                    previewParts.push(`${k}: "${esc(truncate(v, 40))}"`);
+                } else if (typeof v === 'number' || typeof v === 'boolean') {
+                    previewParts.push(`${k}: ${v}`);
+                } else if (Array.isArray(v)) {
+                    previewParts.push(`${k}: [${v.length} item${v.length !== 1 ? 's' : ''}]`);
+                } else if (v === null) {
+                    previewParts.push(`${k}: null`);
+                } else if (typeof v === 'object') {
+                    previewParts.push(`${k}: {...}`);
+                }
+            }
+        }
+        const remaining = keys.filter(k => !IMPORTANT_KEYS.includes(k)).length;
+        const preview = previewParts.length > 0
+            ? previewParts.join(', ') + (remaining > 0 ? ` +${remaining}` : '')
+            : `${keys.length} key${keys.length > 1 ? 's' : ''}`;
+
+        const children = keys.map(k => {
+            const v = jsonTreeHTML(value[k], depth + 1);
+            return `<div class="jt-pair"><span class="jt-key">"${esc(k)}": </span>${v}</div>`;
+        }).join('');
+
+        return `<span class="jt-node jt-object">`
+            + `<span class="jt-toggle ${collapsed ? '' : 'expanded'}" data-depth="${depth}">${collapsed ? '+' : '-'}</span>`
+            + `<span class="jt-bracket">{</span>`
+            + `<span class="jt-preview ${collapsed ? '' : 'hidden'}">${preview}</span>`
+            + `<span class="jt-children ${collapsed ? 'hidden' : ''}">${children}</span>`
+            + `<span class="jt-bracket">}</span>`
+            + `</span>`;
+    }
+
+    return String(value);
+}
+
+// Global click handler for JSON tree toggles (event delegation)
+document.addEventListener('click', function(e) {
+    const toggle = e.target.closest('.jt-toggle');
+    if (!toggle) return;
+
+    const node = toggle.parentElement;
+    if (!node || !node.classList.contains('jt-node')) return;
+
+    // Find direct children of this node
+    const children = node.querySelector('.jt-children');
+    const preview = node.querySelector('.jt-preview');
+    if (!children) return;
+
+    const isExpanding = toggle.textContent === '+';
+
+    if (isExpanding) {
+        // Expand this node AND all descendants
+        expandAll(node);
+    } else {
+        // Collapse this node
+        children.classList.add('hidden');
+        if (preview) preview.classList.remove('hidden');
+        toggle.textContent = '+';
+        toggle.classList.remove('expanded');
+    }
+});
+
+function expandAll(node) {
+    // Expand all nested toggles within this node
+    const allToggles = node.querySelectorAll('.jt-toggle');
+    allToggles.forEach(t => {
+        t.textContent = '-';
+        t.classList.add('expanded');
+    });
+    const allChildren = node.querySelectorAll('.jt-children');
+    allChildren.forEach(c => c.classList.remove('hidden'));
+    const allPreviews = node.querySelectorAll('.jt-preview');
+    allPreviews.forEach(p => p.classList.add('hidden'));
 }
 
 function esc(str) {

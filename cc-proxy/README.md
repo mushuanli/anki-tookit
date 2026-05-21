@@ -1,6 +1,6 @@
-# Coding Agent Explorer (Rust)
+# CC Proxy
 
-实时拦截、可视化、分析 AI Coding Agent（Claude Code）API 流量的本地代理工具。
+Claude Code 透明代理 — 实时拦截、可视化、分析 AI Coding Agent（Claude Code）API 流量的本地代理工具。
 
 基于 [tndata/CodingAgentExplorer](https://github.com/tndata/CodingAgentExplorer) 用 Rust 重写，单二进制 ~15MB，无需运行时，冷启动 <10ms。
 
@@ -29,8 +29,8 @@ HookAgent ──► :5000/api/hook-event
 
 ```bash
 # 需要 Rust 1.80+
-git clone https://github.com/tndata/CodingAgentExplorer.git
-cd CodingAgentExplorer
+git clone https://github.com/tndata/cc-proxy.git
+cd cc-proxy
 
 # 构建 release
 cargo build -p proxy-server --release

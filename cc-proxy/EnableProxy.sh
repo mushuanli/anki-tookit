@@ -4,7 +4,7 @@
 
 export ANTHROPIC_BASE_URL="http://localhost:8888"
 
-echo "Coding Agent Explorer proxy enabled."
+echo "CC Proxy enabled."
 echo "  Anthropic API → http://localhost:8888"
 echo "  Dashboard     → http://localhost:5000"
 echo ""

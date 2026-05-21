@@ -378,3 +378,117 @@ td.status-5xx { color: var(--error); }
     border-color: var(--border);
     color: var(--text);
 }
+
+/* ── JSON Tree Viewer ── */
+.json-tree {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    padding: 0;
+    user-select: text;
+}
+
+.detail-headers,
+.detail-plain {
+    margin: 0 0 12px 0;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-muted);
+}
+
+.detail-headers {
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+}
+
+.jt-node {
+    display: inline;
+}
+
+.jt-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-right: 2px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    border-radius: 3px;
+    user-select: none;
+    vertical-align: middle;
+    transition: color 0.15s;
+}
+
+.jt-toggle:hover {
+    color: var(--accent2);
+    background: rgba(14, 165, 233, 0.15);
+}
+
+.jt-toggle.expanded {
+    color: var(--accent2);
+}
+
+.jt-bracket {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.jt-preview {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 0 2px;
+}
+
+.jt-children {
+    display: block;
+    padding-left: 20px;
+    border-left: 1px solid var(--border);
+    margin-left: 6px;
+}
+
+.jt-children.hidden {
+    display: none;
+}
+
+.jt-pair {
+    padding: 1px 0;
+}
+
+.jt-item {
+    padding: 1px 0;
+}
+
+.jt-key {
+    color: var(--accent2);
+}
+
+.jt-index {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    margin-right: 2px;
+}
+
+.jt-string {
+    color: var(--success);
+}
+
+.jt-number {
+    color: var(--accent);
+}
+
+.jt-bool {
+    color: var(--warning);
+}
+
+.jt-null {
+    color: var(--text-muted);
+    font-style: italic;
+}

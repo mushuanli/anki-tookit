@@ -1,8 +1,8 @@
-# Coding Agent Explorer — Rust 重构设计方案
+# CC Proxy — Rust 重构设计方案
 
 ## 1. 项目概述
 
-**原始项目**: [CodingAgentExplorer](https://github.com/tndata/CodingAgentExplorer) — 基于 .NET 10 + ASP.NET Core + YARP 的 AI Coding Agent API 流量拦截与可视化工具。
+**原始项目**: [CodingAgentExplorer](https://github.com/tndata/CodingAgentExplorer)（现更名为 cc-proxy）— 基于 .NET 10 + ASP.NET Core + YARP 的 AI Coding Agent API 流量拦截与可视化工具。
 
 **核心功能**:
 - 透明反向代理，拦截 Claude Code ↔ Anthropic API 的全量请求/响应
@@ -416,7 +416,7 @@ fn build_har(session: &Session, requests: &[ProxiedRequest]) -> Value {
     json!({
         "log": {
             "version": "1.2",
-            "creator": { "name": "CodingAgentExplorer", "version": env!("CARGO_PKG_VERSION") },
+            "creator": { "name": "cc-proxy", "version": env!("CARGO_PKG_VERSION") },
             "entries": requests.iter().map(|r| {
                 json!({
                     "startedDateTime": r.timestamp.to_rfc3339(),
@@ -722,7 +722,7 @@ cargo build -p proxy-server --release
 # → target/release/proxy-hook-agent (~5MB, stripped)
 
 # 配置文件
-cp config.toml /usr/local/etc/coding-agent-explorer/config.toml
+cp config.toml /usr/local/etc/cc-proxy/config.toml
 
 # 运行
 ./proxy-server --config config.toml
