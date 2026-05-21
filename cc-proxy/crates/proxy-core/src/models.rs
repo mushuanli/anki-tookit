@@ -171,6 +171,165 @@ impl Session {
     }
 }
 
+// ── Model name translation ──
+
+/// Translate a Claude model name to the upstream's equivalent using a model map.
+///
+/// Matching strategy (in order):
+/// 1. Exact match on the full model name
+/// 2. Strip `[1m]` suffix → exact match on the base name
+/// 3. Longest prefix match (handles dated versions like `claude-sonnet-4-6-20250514`)
+/// 4. If input had `[1m]` and the target doesn't, append `[1m]` to the result
+/// 5. Fallback: return the original model name unchanged
+pub fn translate_model(model: &str, model_map: &HashMap<String, String>) -> String {
+    if model_map.is_empty() {
+        return model.to_string();
+    }
+
+    // 1. Exact match
+    if let Some(mapped) = model_map.get(model) {
+        return mapped.clone();
+    }
+
+    // 2. Strip [1m] suffix and try exact match
+    let has_1m = model.ends_with("[1m]");
+    let base = if has_1m {
+        model.strip_suffix("[1m]").unwrap()
+    } else {
+        model
+    };
+
+    if let Some(mapped) = model_map.get(base) {
+        if has_1m && !mapped.ends_with("[1m]") {
+            return format!("{}[1m]", mapped);
+        }
+        return mapped.clone();
+    }
+
+    // 3. Longest prefix match (for dated versions)
+    let mut best: Option<(&String, &String)> = None;
+    for (pattern, target) in model_map {
+        if base.starts_with(pattern.as_str()) {
+            match best {
+                Some((ref p, _)) if pattern.len() <= p.len() => {}
+                _ => best = Some((pattern, target)),
+            }
+        }
+    }
+
+    if let Some((_, target)) = best {
+        if has_1m && !target.ends_with("[1m]") {
+            return format!("{}[1m]", target);
+        }
+        return target.clone();
+    }
+
+    // 4. No match — return original
+    model.to_string()
+}
+
+#[cfg(test)]
+mod translate_tests {
+    use super::*;
+
+    fn sample_map() -> HashMap<String, String> {
+        HashMap::from([
+            ("claude-sonnet-4-6".into(), "deepseek-v4-pro".into()),
+            ("claude-opus-4-6".into(), "deepseek-v4-pro[1m]".into()),
+            ("claude-haiku-4-5".into(), "deepseek-chat".into()),
+        ])
+    }
+
+    #[test]
+    fn exact_match() {
+        let map = sample_map();
+        assert_eq!(translate_model("claude-sonnet-4-6", &map), "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn prefix_match_dated_version() {
+        let map = sample_map();
+        assert_eq!(
+            translate_model("claude-sonnet-4-6-20250514", &map),
+            "deepseek-v4-pro"
+        );
+    }
+
+    #[test]
+    fn prefix_match_dated_opus() {
+        let map = sample_map();
+        assert_eq!(
+            translate_model("claude-opus-4-6-20250514", &map),
+            "deepseek-v4-pro[1m]"
+        );
+    }
+
+    #[test]
+    fn exact_match_with_1m() {
+        let map = sample_map();
+        assert_eq!(
+            translate_model("claude-sonnet-4-6[1m]", &map),
+            "deepseek-v4-pro[1m]"
+        );
+    }
+
+    #[test]
+    fn prefix_match_dated_with_1m() {
+        let map = sample_map();
+        assert_eq!(
+            translate_model("claude-sonnet-4-6-20250514[1m]", &map),
+            "deepseek-v4-pro[1m]"
+        );
+    }
+
+    #[test]
+    fn haiku_exact() {
+        let map = sample_map();
+        assert_eq!(
+            translate_model("claude-haiku-4-5-20251001", &map),
+            "deepseek-chat"
+        );
+    }
+
+    #[test]
+    fn no_match_returns_original() {
+        let map = sample_map();
+        assert_eq!(
+            translate_model("gpt-4-turbo", &map),
+            "gpt-4-turbo"
+        );
+    }
+
+    #[test]
+    fn empty_map_returns_original() {
+        let map = HashMap::new();
+        assert_eq!(
+            translate_model("claude-sonnet-4-6", &map),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn opus_dated_with_1m_target_already_has_1m() {
+        // Input has [1m], target already has [1m] → no double append
+        let map = sample_map();
+        assert_eq!(
+            translate_model("claude-opus-4-6-20250514[1m]", &map),
+            "deepseek-v4-pro[1m]"
+        );
+    }
+
+    #[test]
+    fn longest_prefix_wins_over_short() {
+        let mut map = sample_map();
+        map.insert("claude-sonnet".into(), "wrong-model".into());
+        assert_eq!(
+            translate_model("claude-sonnet-4-6-20250514", &map),
+            "deepseek-v4-pro"
+        );
+    }
+}
+
 // ── Upstream info (for frontend) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +338,7 @@ pub struct UpstreamInfo {
     pub url: String,
     pub active: bool,
     pub has_token: bool,
+    pub model_map: HashMap<String, String>,
 }
 
 // ── WebSocket message envelope ──

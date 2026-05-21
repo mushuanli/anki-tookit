@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +16,10 @@ pub struct UpstreamTarget {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Claude model → upstream model mapping.
+    /// Keys are prefix-matched, so "claude-sonnet-4-6" matches "claude-sonnet-4-6-20250514".
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_map: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +50,7 @@ impl ProxyConfig {
                 name: "default".into(),
                 url: self.api_target.trim_end_matches('/').to_string(),
                 token: None,
+                model_map: HashMap::new(),
             });
             self.active_upstream = "default".into();
             self.api_target.clear();

@@ -362,12 +362,14 @@ function renderHookTable(events) {
 // ── Upstream targets ──
 
 let upstreamEditMode = null; // 'add' | 'edit' (null = hidden)
+let upstreamList = []; // cached list for editing model_map
 
 function populateUpstreamDropdown(list, activeUrl) {
     const select = document.getElementById('upstream-select');
     const display = document.getElementById('upstream-url-display');
     const delBtn = document.getElementById('btn-upstream-delete');
     select.innerHTML = '';
+    upstreamList = list || [];
 
     if (!list || list.length === 0) {
         select.innerHTML = '<option value="">— none —</option>';
@@ -380,16 +382,38 @@ function populateUpstreamDropdown(list, activeUrl) {
     list.forEach((u, i) => {
         const opt = document.createElement('option');
         opt.value = u.name;
-        opt.textContent = u.name + (u.has_token ? ' \uD83D\uDD11' : '');
+        opt.textContent = u.name + (u.has_token ? ' \uD83D\uDD11' : '')
+            + (u.model_map && Object.keys(u.model_map).length > 0 ? ' \uD83D\uDD04' : '');
         if (u.active) {
             opt.selected = true;
             activeName = u.name;
-            display.textContent = u.url + (u.has_token ? ' (has token)' : '');
+            display.textContent = u.url + (u.has_token ? ' (has token)' : '')
+                + (u.model_map && Object.keys(u.model_map).length > 0 ? ' (has model map)' : '');
         }
         select.appendChild(opt);
     });
 
     delBtn.disabled = list.length <= 1;
+}
+
+// ── Model map helpers ──
+
+function modelMapToText(map) {
+    if (!map || typeof map !== 'object') return '';
+    return Object.entries(map).map(([k, v]) => `${k} = ${v}`).join('\n');
+}
+
+function textToModelMap(text) {
+    const map = {};
+    text.split('\n').forEach(line => {
+        const idx = line.indexOf('=');
+        if (idx > 0) {
+            const key = line.substring(0, idx).trim();
+            const val = line.substring(idx + 1).trim();
+            if (key && val) map[key] = val;
+        }
+    });
+    return map;
 }
 
 // Dropdown change → activate
@@ -405,6 +429,7 @@ document.getElementById('btn-upstream-add').addEventListener('click', () => {
     document.getElementById('upstream-edit-name').value = '';
     document.getElementById('upstream-edit-url').value = '';
     document.getElementById('upstream-edit-token').value = '';
+    document.getElementById('upstream-edit-modelmap').value = '';
     document.getElementById('upstream-edit-name').disabled = false;
     document.getElementById('upstream-edit-form').classList.remove('hidden');
     document.getElementById('upstream-edit-name').focus();
@@ -418,10 +443,15 @@ document.getElementById('btn-upstream-edit').addEventListener('click', () => {
     const display = document.getElementById('upstream-url-display');
     upstreamEditMode = 'edit';
     document.getElementById('upstream-edit-name').value = name;
-    // display.textContent may include " (has token)" suffix — strip it
-    document.getElementById('upstream-edit-url').value = display.textContent.replace(' (has token)', '');
+    // display.textContent may include " (has token)(has model map)" suffixes — strip them
+    document.getElementById('upstream-edit-url').value = display.textContent.replace(/ \(has token\)| \(has model map\)/g, '');
     document.getElementById('upstream-edit-token').value = '';
     document.getElementById('upstream-edit-token').placeholder = 'Token (unchanged if empty)';
+
+    // Pre-fill model_map from cached upstream list
+    const u = upstreamList.find(u => u.name === name);
+    document.getElementById('upstream-edit-modelmap').value = u ? modelMapToText(u.model_map) : '';
+
     document.getElementById('upstream-edit-name').disabled = true;
     document.getElementById('upstream-edit-form').classList.remove('hidden');
     document.getElementById('upstream-edit-url').focus();
@@ -435,6 +465,8 @@ document.getElementById('btn-upstream-save').addEventListener('click', async () 
     const name = nameInput.value.trim();
     const url = urlInput.value.trim();
     const token = tokenInput.value.trim();
+    const modelMapText = document.getElementById('upstream-edit-modelmap').value.trim();
+    const modelMap = modelMapText ? textToModelMap(modelMapText) : {};
     if (!name || !url) return;
 
     let resp;
@@ -442,10 +474,10 @@ document.getElementById('btn-upstream-save').addEventListener('click', async () 
         resp = await fetch('/api/upstreams', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, url, token: token || undefined })
+            body: JSON.stringify({ name, url, token: token || undefined, model_map: modelMap })
         });
     } else {
-        const body = { url };
+        const body = { url, model_map: modelMap };
         if (token) body.token = token;
         resp = await fetch(`/api/upstreams/${encodeURIComponent(name)}`, {
             method: 'PUT',

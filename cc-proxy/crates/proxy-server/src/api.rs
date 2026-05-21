@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -268,12 +269,20 @@ async fn add_upstream(
         _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "URL is required"}))).into_response(),
     };
     let token = payload["token"].as_str().filter(|t| !t.is_empty()).map(|t| t.to_string());
+    let model_map: HashMap<String, String> = payload["model_map"]
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut upstreams = state.upstreams.write().await;
     if upstreams.iter().any(|u| u.name == name) {
         return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("Upstream '{name}' already exists")}))).into_response();
     }
-    upstreams.push(UpstreamTarget { name, url, token });
+    upstreams.push(UpstreamTarget { name, url, token, model_map });
     drop(upstreams);
 
     state.persist_upstreams().await;
@@ -295,6 +304,16 @@ async fn update_upstream(
     let token_update = payload.get("token").map(|v| {
         v.as_str().filter(|t| !t.is_empty()).map(|t| t.to_string())
     });
+    // model_map: if key is present, update (empty object = clear)
+    let model_map_update: Option<HashMap<String, String>> = payload.get("model_map").map(|v| {
+        v.as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
 
     let mut upstreams = state.upstreams.write().await;
     let is_active = state.active_upstream.read().await.clone() == name;
@@ -302,6 +321,9 @@ async fn update_upstream(
         u.url = new_url.clone();
         if let Some(ref tok) = token_update {
             u.token = tok.clone();
+        }
+        if let Some(ref map) = model_map_update {
+            u.model_map = map.clone();
         }
     } else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response();

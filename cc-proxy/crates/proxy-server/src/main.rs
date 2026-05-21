@@ -78,6 +78,7 @@ impl AppState {
                 url: u.url.clone(),
                 active: u.url == active_url,
                 has_token: u.token.is_some(),
+                model_map: u.model_map.clone(),
             })
             .collect()
     }

@@ -90,6 +90,34 @@ fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> 
     fwd
 }
 
+// ── Model translation helper ──
+
+/// If `model_map` contains a matching entry, replace the `model` field in the
+/// request body JSON and update `captured` fields accordingly.
+/// Returns the (possibly modified) body bytes.
+fn apply_model_translation(
+    model_map: &std::collections::HashMap<String, String>,
+    captured: &mut ProxiedRequest,
+    body_bytes: Bytes,
+) -> Bytes {
+    if model_map.is_empty() {
+        return body_bytes;
+    }
+    if let Some(model) = &captured.model {
+        let new_model = proxy_core::translate_model(model, model_map);
+        if &new_model != model {
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                json["model"] = serde_json::Value::String(new_model.clone());
+                let new_bytes = Bytes::from(serde_json::to_vec(&json).unwrap_or_default());
+                captured.model = Some(new_model);
+                captured.request_body = Some(pretty_json(&new_bytes));
+                return new_bytes;
+            }
+        }
+    }
+    body_bytes
+}
+
 // ── Router ──
 
 pub fn build_router(state: Arc<AppState>) -> axum::Router {
@@ -215,7 +243,18 @@ async fn handle_forward_proxy(
         captured.max_tokens = json.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
     }
 
-    // Build upstream request
+    // Build upstream request with model translation
+    let active_name = state.active_upstream.read().await.clone();
+    let model_map = {
+        let upstreams = state.upstreams.read().await;
+        upstreams
+            .iter()
+            .find(|u| u.name == active_name)
+            .map(|u| u.model_map.clone())
+            .unwrap_or_default()
+    };
+    let body_bytes = apply_model_translation(&model_map, &mut captured, body_bytes);
+
     let upstream_req = match state
         .client
         .request(method.clone(), &upstream_url)
@@ -305,15 +344,18 @@ async fn handle_reverse_proxy(
     let upstream_base = state.upstream_target.read().await.clone();
     let upstream_url = format!("{}{}", upstream_base, uri.path());
 
-    // Override auth if active upstream has its own token
+    // Override auth if active upstream has its own token, and get model_map
     let active_name = state.active_upstream.read().await.clone();
-    let upstream_token = {
+    let (upstream_token, model_map) = {
         let upstreams = state.upstreams.read().await;
-        upstreams
-            .iter()
-            .find(|u| u.name == active_name)
-            .and_then(|u| u.token.clone())
+        let u = upstreams.iter().find(|u| u.name == active_name);
+        let token = u.and_then(|u| u.token.clone());
+        let map = u.map(|u| u.model_map.clone()).unwrap_or_default();
+        (token, map)
     };
+
+    // Translate model name using upstream model_map
+    let body_bytes = apply_model_translation(&model_map, &mut captured, body_bytes);
 
     // Build upstream request
     let upstream_req = match state

@@ -360,6 +360,23 @@ td.status-5xx { color: var(--error); }
     font-size: 0.82rem;
 }
 
+.model-map-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-right: 4px;
+}
+
+#upstream-edit-modelmap {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    resize: vertical;
+}
+
 #btn-upstream-add,
 #btn-upstream-edit,
 #btn-upstream-delete {
