@@ -24,7 +24,7 @@ fn short_id() -> String {
     Uuid::new_v4().to_string()[..12].to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxiedRequest {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -52,6 +52,8 @@ pub struct ProxiedRequest {
     // Timing
     pub duration_ms: Option<u64>,
     pub time_to_first_token_ms: Option<u64>,
+    // Session tracking
+    pub session_id: Option<String>,
     // Error
     pub error: Option<String>,
 }
@@ -81,6 +83,7 @@ impl ProxiedRequest {
             content_text: None,
             duration_ms: None,
             time_to_first_token_ms: None,
+            session_id: None,
             error: None,
         }
     }
@@ -155,9 +158,12 @@ pub struct Session {
 
 impl Session {
     pub fn new(label: Option<String>) -> Self {
+        let label = label.filter(|l| !l.is_empty()).unwrap_or_else(|| {
+            Utc::now().format("Recording %Y-%m-%d %H:%M").to_string()
+        });
         Self {
             id: short_id(),
-            label,
+            label: Some(label),
             started_at: Utc::now(),
             ended_at: None,
             request_ids: Vec::new(),

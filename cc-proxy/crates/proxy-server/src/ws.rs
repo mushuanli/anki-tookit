@@ -19,26 +19,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Send history on connect
-    let history_json = serde_json::to_string(&WsMessage::History {
-        requests: state.request_store.get_all(),
-    })
-    .ok();
+    let requests = state.db.list_requests(None, None, None, None, Some(500)).unwrap_or_default();
+    let history_json = serde_json::to_string(&WsMessage::History { requests }).ok();
     if let Some(json) = history_json {
         let _ = sender.send(Message::Text(json.into())).await;
     }
 
-    let hook_history = serde_json::to_string(&WsMessage::HookHistory {
-        events: state.hook_store.get_all(),
-    })
-    .ok();
+    let hooks = state.db.list_hooks().unwrap_or_default();
+    let hook_history = serde_json::to_string(&WsMessage::HookHistory { events: hooks }).ok();
     if let Some(json) = hook_history {
         let _ = sender.send(Message::Text(json.into())).await;
     }
 
-    let mcp_history = serde_json::to_string(&WsMessage::McpHistory {
-        requests: state.mcp_store.get_all(),
-    })
-    .ok();
+    let mcp = state.db.list_mcp().unwrap_or_default();
+    let mcp_history = serde_json::to_string(&WsMessage::McpHistory { requests: mcp }).ok();
     if let Some(json) = mcp_history {
         let _ = sender.send(Message::Text(json.into())).await;
     }
@@ -52,7 +46,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let _ = sender.send(Message::Text(json.into())).await;
     }
 
-    // Push current upstream list
     let upstream_msg = serde_json::to_string(&WsMessage::UpstreamChanged {
         active_url: state.upstream_target.read().await.clone(),
         upstreams: state.upstream_info_list().await,
@@ -62,35 +55,42 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let _ = sender.send(Message::Text(json.into())).await;
     }
 
+    // Send current capture status
+    let tee_status = serde_json::to_string(&WsMessage::TeeStatusChanged {
+        enabled: state.tee_writer.is_enabled(),
+    })
+    .ok();
+    if let Some(json) = tee_status {
+        let _ = sender.send(Message::Text(json.into())).await;
+    }
+
     // Subscribe to broadcast
     let mut broadcast_rx = state.broadcast_subscribe();
 
     loop {
         tokio::select! {
-            // Broadcast message → forward to WebSocket
             msg = broadcast_rx.recv() => {
                 match msg {
                     Ok(ws_msg) => {
                         if let Ok(json) = serde_json::to_string(&ws_msg) {
                             if sender.send(Message::Text(json.into())).await.is_err() {
-                                break; // Client disconnected
+                                break;
                             }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("WebSocket broadcast lagged by {} messages", n);
                     }
-                    Err(_) => break, // Channel closed
+                    Err(_) => break,
                 }
             }
-            // WebSocket message from client → handle commands
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let _ = handle_client_message(&state, &text).await;
                     }
                     Some(Ok(Message::Close(_))) => break,
-                    None => break, // Stream ended
+                    None => break,
                     _ => {}
                 }
             }
@@ -98,25 +98,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-async fn handle_client_message(state: &AppState, text: &str) -> Result<(), String> {
-    let cmd: serde_json::Value =
+async fn handle_client_message(_state: &AppState, text: &str) -> Result<(), String> {
+    let _cmd: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("Invalid JSON: {}", e))?;
-    let action = cmd
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    match action {
-        "clear" => {
-            state.request_store.clear();
-            state.hook_store.clear();
-            let _ = state.broadcast_send(WsMessage::Cleared);
-        }
-        "clear_mcp" => {
-            state.mcp_store.clear();
-            let _ = state.broadcast_send(WsMessage::McpCleared);
-        }
-        _ => {}
-    }
+    // Client commands are no longer needed — all operations go through REST API
     Ok(())
 }

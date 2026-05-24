@@ -90,6 +90,25 @@ fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> 
     fwd
 }
 
+// ── Session ID extraction ──
+
+/// Extract session_id from request body metadata.user_id JSON.
+/// Format: {"metadata": {"user_id": "{\"session_id\":\"...\"}"}}
+fn extract_session_id(body_json: &serde_json::Value) -> Option<String> {
+    body_json
+        .get("metadata")
+        .and_then(|m| m.get("user_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|inner| {
+            inner
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+}
+
 // ── Model translation helper ──
 
 /// If `model_map` contains a matching entry, replace the `model` field in the
@@ -241,9 +260,13 @@ async fn handle_forward_proxy(
         captured.model = json.get("model").and_then(|v| v.as_str()).map(String::from);
         captured.is_streaming = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
         captured.max_tokens = json.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
+        captured.session_id = extract_session_id(&json);
+        if let Some(ref sid) = captured.session_id {
+            let _ = state.db.ensure_session(sid);
+        }
     }
 
-    // Build upstream request with model translation
+    // Build upstream request with model translation (forward proxy mode)
     let active_name = state.active_upstream.read().await.clone();
     let model_map = {
         let upstreams = state.upstreams.read().await;
@@ -266,7 +289,7 @@ async fn handle_forward_proxy(
         Err(e) => {
             captured.error = Some(format!("Failed to build upstream request: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            let _ = state.request_store.push(captured.clone());
+            let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -280,7 +303,7 @@ async fn handle_forward_proxy(
         Err(e) => {
             captured.error = Some(format!("Upstream error: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            let _ = state.request_store.push(captured.clone());
+            let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -338,6 +361,10 @@ async fn handle_reverse_proxy(
         captured.model = json.get("model").and_then(|v| v.as_str()).map(String::from);
         captured.is_streaming = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
         captured.max_tokens = json.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
+        captured.session_id = extract_session_id(&json);
+        if let Some(ref sid) = captured.session_id {
+            let _ = state.db.ensure_session(sid);
+        }
     }
 
     // Build upstream URL from dynamic config
@@ -369,7 +396,7 @@ async fn handle_reverse_proxy(
         Err(e) => {
             captured.error = Some(format!("Failed to build upstream request: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            let _ = state.request_store.push(captured.clone());
+            let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -383,7 +410,7 @@ async fn handle_reverse_proxy(
         Err(e) => {
             captured.error = Some(format!("Upstream error: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            let _ = state.request_store.push(captured.clone());
+            let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -449,10 +476,9 @@ async fn handle_non_streaming_response(
             }
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
 
-            let _ = state.request_store.push(captured.clone());
+            let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured.clone()));
             state.tee_writer.write_exchange(&captured).await;
-            record_in_sessions(&state).await;
 
             let mut resp = Response::builder().status(status);
             for (k, v) in resp_headers.iter() {
@@ -465,7 +491,7 @@ async fn handle_non_streaming_response(
         Err(e) => {
             captured.error = Some(format!("Failed to read response: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            let _ = state.request_store.push(captured.clone());
+            let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -569,10 +595,10 @@ async fn handle_streaming_response(
         captured.duration_ms = Some(start.elapsed().as_millis() as u64);
         captured.content_text = merge_delta_text(&captured.sse_events);
 
-        let _ = state_clone.request_store.push(captured.clone());
+        let _ = state_clone.db.insert_request(&captured);
+        let _ = state_clone.db.insert_sse_events(&captured.id, &captured.sse_events);
         let _ = state_clone.broadcast_send(WsMessage::RequestUpdated(captured.clone()));
         state_clone.tee_writer.write_exchange(&captured).await;
-        record_in_sessions(&state_clone).await;
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
@@ -667,18 +693,5 @@ fn format_labeled(text: &str, block_type: &str) -> String {
         "thinking" => format!("[Thinking]\n{}", text.trim()),
         "tool_use" => format!("[Tool Use]\n{}", text.trim()),
         _ => text.trim().to_string(),
-    }
-}
-
-async fn record_in_sessions(state: &AppState) {
-    let mut sessions = state.sessions.write().await;
-    for session in sessions.iter_mut() {
-        if session.status == proxy_core::models::SessionStatus::Recording {
-            if let Some(last) = state.request_store.get_all().last() {
-                if session.request_ids.last() != Some(&last.id) {
-                    session.request_ids.push(last.id.clone());
-                }
-            }
-        }
     }
 }

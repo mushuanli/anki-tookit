@@ -59,7 +59,7 @@ async fn mcp_handler(
         Ok(req) => req,
         Err(e) => {
             captured.error = Some(format!("Failed to build MCP request: {}", e));
-            let _ = state.mcp_store.push(captured.clone());
+            let _ = state.db.insert_mcp(&captured);
             let _ = state.broadcast_send(WsMessage::NewMcp(captured));
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -84,7 +84,7 @@ async fn mcp_handler(
                     captured.response_body =
                         Some(String::from_utf8_lossy(&resp_bytes).to_string());
 
-                    let _ = state.mcp_store.push(captured.clone());
+                    let _ = state.db.insert_mcp(&captured);
                     let _ = state.broadcast_send(WsMessage::NewMcp(captured));
 
                     let mut response = Response::builder().status(status);
@@ -97,7 +97,7 @@ async fn mcp_handler(
                 }
                 Err(e) => {
                     captured.error = Some(format!("Failed to read MCP response: {}", e));
-                    let _ = state.mcp_store.push(captured.clone());
+                    let _ = state.db.insert_mcp(&captured);
                     let _ = state.broadcast_send(WsMessage::NewMcp(captured));
                     (
                         StatusCode::BAD_GATEWAY,
@@ -113,7 +113,7 @@ async fn mcp_handler(
         }
         Err(e) => {
             captured.error = Some(format!("MCP upstream error: {}", e));
-            let _ = state.mcp_store.push(captured.clone());
+            let _ = state.db.insert_mcp(&captured);
             let _ = state.broadcast_send(WsMessage::NewMcp(captured));
             (
                 StatusCode::BAD_GATEWAY,

@@ -4,7 +4,17 @@ const wsUrl = `${protocol}//${location.host}/ws`;
 let ws = null;
 let selectedRequestId = null;
 let captureEnabled = false;
-let currentSessionId = null;
+
+// ── Pagination & filter state ──
+let currentPage = 1;
+let pageSize = 50;
+let filterModel = '';
+let filterSession = '';
+let filterTimeFrom = '';
+let filterTimeTo = '';
+
+// ── Selection state ──
+const selectedIds = new Set();
 
 function connect() {
     ws = new WebSocket(wsUrl);
@@ -74,12 +84,6 @@ function handleMessage(msg) {
                 document.getElementById('mcp-destination').value = msg.payload.destination_url;
             }
             break;
-        case 'SessionStarted':
-            addSessionCard(msg.payload);
-            break;
-        case 'SessionStopped':
-            updateSessionCard(msg.payload);
-            break;
         case 'UpstreamChanged':
             populateUpstreamDropdown(msg.payload.upstreams, msg.payload.active_url);
             break;
@@ -102,37 +106,75 @@ document.querySelectorAll('nav a').forEach(link => {
     });
 });
 
-// ── Request table ──
+// ── Request table (paginated + filtered) ──
 const requestRows = new Map();
 
+function getFilteredRequests() {
+    let result = [];
+    for (const req of requestRows.values()) {
+        if (filterModel && req.model !== filterModel) continue;
+        if (filterSession && req.session_id !== filterSession) continue;
+        if (filterTimeFrom && new Date(req.timestamp) < new Date(filterTimeFrom)) continue;
+        if (filterTimeTo && new Date(req.timestamp) > new Date(filterTimeTo)) continue;
+        result.push(req);
+    }
+    result.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return result;
+}
+
+function renderPage() {
+    const filtered = getFilteredRequests();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (currentPage > totalPages) currentPage = totalPages;
+    const start = (currentPage - 1) * pageSize;
+    const pageItems = filtered.slice(start, start + pageSize);
+
+    const tbody = document.getElementById('requests-tbody');
+    tbody.innerHTML = '';
+    pageItems.forEach(req => {
+        const tr = document.createElement('tr');
+        tr.id = `req-${req.id}`;
+        tr.innerHTML = buildRequestRowHTML(req);
+        tr.addEventListener('click', () => showRequestDetail(req));
+        tbody.appendChild(tr);
+    });
+
+    if (selectedRequestId) {
+        const row = document.getElementById(`req-${selectedRequestId}`);
+        if (row) row.classList.add('selected');
+    }
+
+    updatePagination(filtered.length, totalPages);
+    updateSelectionUI();
+}
+
+function updatePagination(total, totalPages) {
+    document.getElementById('page-info').textContent = `${total} requests`;
+    document.getElementById('page-num').textContent = `Page ${currentPage} / ${totalPages}`;
+    document.getElementById('btn-page-prev').disabled = currentPage <= 1;
+    document.getElementById('btn-page-next').disabled = currentPage >= totalPages;
+}
+
 function upsertRequestRow(req) {
-    const existing = requestRows.get(req.id);
-    if (existing) {
-        requestRows.set(req.id, req);
-        updateRequestRow(req);
+    const isNew = !requestRows.has(req.id);
+    requestRows.set(req.id, req);
+    if (isNew || req.id === selectedRequestId) {
+        renderPage();
     } else {
-        requestRows.set(req.id, req);
-        prependRequestRow(req);
+        const row = document.getElementById(`req-${req.id}`);
+        if (row) {
+            row.innerHTML = buildRequestRowHTML(req);
+        }
     }
     updateFilterOptions();
 }
 
-function prependRequestRow(req) {
-    const tbody = document.getElementById('requests-tbody');
-    const tr = document.createElement('tr');
-    tr.id = `req-${req.id}`;
-    tr.innerHTML = buildRequestRowHTML(req);
-    tr.addEventListener('click', () => showRequestDetail(req));
-    tbody.prepend(tr);
-    // Keep max 200 rows in view
-    while (tbody.children.length > 200) tbody.lastChild.remove();
-}
-
-function updateRequestRow(req) {
-    const row = document.getElementById(`req-${req.id}`);
-    if (row) {
-        row.innerHTML = buildRequestRowHTML(req);
-    }
+function renderRequestTable(requests) {
+    requestRows.clear();
+    requests.forEach(req => requestRows.set(req.id, req));
+    currentPage = 1;
+    renderPage();
+    updateFilterOptions();
 }
 
 function buildRequestRowHTML(req) {
@@ -142,34 +184,21 @@ function buildRequestRowHTML(req) {
         else if (req.status_code < 500) statusClass = 'status-4xx';
         else statusClass = 'status-5xx';
     }
+    const checked = selectedIds.has(req.id) ? 'checked' : '';
     return `
+        <td class="col-chk"><input type="checkbox" class="row-chk" data-id="${req.id}" ${checked}></td>
         <td>${formatTime(req.timestamp)}</td>
         <td>${esc(req.method)}</td>
         <td>${esc(req.path)}</td>
         <td class="${statusClass}">${req.status_code || '—'}</td>
         <td>${esc(req.model || '—')}</td>
-        <td>${req.is_streaming ? '✓' : '—'}</td>
+        <td>${esc(req.session_id?.substring(0, 8) || '—')}</td>
         <td>${req.input_tokens || '—'}</td>
         <td>${req.output_tokens || '—'}</td>
         <td>${req.duration_ms != null ? req.duration_ms + 'ms' : '—'}</td>
         <td>${req.time_to_first_token_ms != null ? req.time_to_first_token_ms + 'ms' : '—'}</td>
+        <td class="row-actions"><button class="btn-delete-row" data-id="${req.id}" title="Delete">×</button></td>
     `;
-}
-
-function renderRequestTable(requests) {
-    requestRows.clear();
-    const tbody = document.getElementById('requests-tbody');
-    tbody.innerHTML = '';
-    requests.forEach(req => {
-        requestRows.set(req.id, req);
-        const tr = document.createElement('tr');
-        tr.id = `req-${req.id}`;
-        tr.innerHTML = buildRequestRowHTML(req);
-        tr.addEventListener('click', () => showRequestDetail(req));
-        tbody.appendChild(tr);
-    });
-    updateFilterOptions();
-    updateRequestCount();
 }
 
 function showRequestDetail(req) {
@@ -179,10 +208,15 @@ function showRequestDetail(req) {
     document.getElementById('request-detail').classList.remove('hidden');
     document.getElementById('detail-title').textContent = `${req.method} ${req.path}`;
 
-    // Highlight selected row
-    document.querySelectorAll('#requests-tbody tr').forEach(r => r.classList.remove('selected'));
-    const row = document.getElementById(`req-${req.id}`);
-    if (row) row.classList.add('selected');
+    const filtered = getFilteredRequests();
+    const idx = filtered.findIndex(r => r.id === req.id);
+    if (idx >= 0) {
+        const targetPage = Math.floor(idx / pageSize) + 1;
+        if (targetPage !== currentPage) {
+            currentPage = targetPage;
+        }
+    }
+    renderPage();
 
     updateDetailView(req);
 }
@@ -225,12 +259,10 @@ function renderDetailBody(headers, body) {
 
 function formatSseContent(req) {
     const parts = [];
-    // Show merged content text first if available
     if (req.content_text) {
         parts.push('=== Response Content ===');
         parts.push(req.content_text);
     }
-    // Show structured events (filter out noisy delta events)
     const structured = req.sse_events.filter(e => {
         if (!e.data) return false;
         try {
@@ -254,7 +286,6 @@ function formatSseContent(req) {
 function appendSseEvent(event) {
     const activeTab = document.querySelector('.detail-tabs .tab.active')?.dataset.tab;
     if (activeTab === 'sse') {
-        // Show streaming progress — will be replaced by merged content on RequestUpdated
         const content = document.getElementById('detail-content');
         if (!content.dataset.streamStarted) {
             content.dataset.streamStarted = '1';
@@ -360,9 +391,8 @@ function renderHookTable(events) {
 }
 
 // ── Upstream targets ──
-
-let upstreamEditMode = null; // 'add' | 'edit' (null = hidden)
-let upstreamList = []; // cached list for editing model_map
+let upstreamEditMode = null;
+let upstreamList = [];
 
 function populateUpstreamDropdown(list, activeUrl) {
     const select = document.getElementById('upstream-select');
@@ -378,7 +408,6 @@ function populateUpstreamDropdown(list, activeUrl) {
         return;
     }
 
-    let activeName = '';
     list.forEach((u, i) => {
         const opt = document.createElement('option');
         opt.value = u.name;
@@ -386,7 +415,6 @@ function populateUpstreamDropdown(list, activeUrl) {
             + (u.model_map && Object.keys(u.model_map).length > 0 ? ' \uD83D\uDD04' : '');
         if (u.active) {
             opt.selected = true;
-            activeName = u.name;
             display.textContent = u.url + (u.has_token ? ' (has token)' : '')
                 + (u.model_map && Object.keys(u.model_map).length > 0 ? ' (has model map)' : '');
         }
@@ -395,8 +423,6 @@ function populateUpstreamDropdown(list, activeUrl) {
 
     delBtn.disabled = list.length <= 1;
 }
-
-// ── Model map helpers ──
 
 function modelMapToText(map) {
     if (!map || typeof map !== 'object') return '';
@@ -416,14 +442,12 @@ function textToModelMap(text) {
     return map;
 }
 
-// Dropdown change → activate
 document.getElementById('upstream-select').addEventListener('change', async () => {
     const name = document.getElementById('upstream-select').value;
     if (!name) return;
     await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
 });
 
-// Add button → show inline form
 document.getElementById('btn-upstream-add').addEventListener('click', () => {
     upstreamEditMode = 'add';
     document.getElementById('upstream-edit-name').value = '';
@@ -435,7 +459,6 @@ document.getElementById('btn-upstream-add').addEventListener('click', () => {
     document.getElementById('upstream-edit-name').focus();
 });
 
-// Edit button → show inline form pre-filled
 document.getElementById('btn-upstream-edit').addEventListener('click', () => {
     const select = document.getElementById('upstream-select');
     const name = select.value;
@@ -443,21 +466,16 @@ document.getElementById('btn-upstream-edit').addEventListener('click', () => {
     const display = document.getElementById('upstream-url-display');
     upstreamEditMode = 'edit';
     document.getElementById('upstream-edit-name').value = name;
-    // display.textContent may include " (has token)(has model map)" suffixes — strip them
     document.getElementById('upstream-edit-url').value = display.textContent.replace(/ \(has token\)| \(has model map\)/g, '');
     document.getElementById('upstream-edit-token').value = '';
     document.getElementById('upstream-edit-token').placeholder = 'Token (unchanged if empty)';
-
-    // Pre-fill model_map from cached upstream list
     const u = upstreamList.find(u => u.name === name);
     document.getElementById('upstream-edit-modelmap').value = u ? modelMapToText(u.model_map) : '';
-
     document.getElementById('upstream-edit-name').disabled = true;
     document.getElementById('upstream-edit-form').classList.remove('hidden');
     document.getElementById('upstream-edit-url').focus();
 });
 
-// Save button
 document.getElementById('btn-upstream-save').addEventListener('click', async () => {
     const nameInput = document.getElementById('upstream-edit-name');
     const urlInput = document.getElementById('upstream-edit-url');
@@ -493,7 +511,6 @@ document.getElementById('btn-upstream-save').addEventListener('click', async () 
     }
 });
 
-// Cancel button
 document.getElementById('btn-upstream-cancel').addEventListener('click', hideUpstreamForm);
 
 function hideUpstreamForm() {
@@ -501,16 +518,13 @@ function hideUpstreamForm() {
     document.getElementById('upstream-edit-form').classList.add('hidden');
 }
 
-// Delete button
 document.getElementById('btn-upstream-delete').addEventListener('click', async () => {
     const name = document.getElementById('upstream-select').value;
     if (!name) return;
     if (!confirm(`Delete upstream "${name}"?`)) return;
     await fetch(`/api/upstreams/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    // UI updates via WS UpstreamChanged
 });
 
-// Initial load
 fetch('/api/upstreams')
     .then(r => r.json())
     .then(data => {
@@ -528,16 +542,6 @@ document.getElementById('btn-set-mcp').addEventListener('click', async () => {
 });
 
 // ── Clear ──
-document.getElementById('btn-clear').addEventListener('click', () => {
-    ws.send(JSON.stringify({ action: 'clear' }));
-    fetch('/api/clear', { method: 'POST' });
-});
-
-document.getElementById('btn-clear-mcp').addEventListener('click', () => {
-    ws.send(JSON.stringify({ action: 'clear_mcp' }));
-    fetch('/api/clear-mcp', { method: 'POST' });
-});
-
 document.getElementById('btn-clear-mcp-view').addEventListener('click', () => {
     fetch('/api/clear-mcp', { method: 'POST' });
 });
@@ -559,97 +563,155 @@ document.getElementById('btn-toggle-capture').addEventListener('click', async ()
 
 function updateCaptureButton() {
     const btn = document.getElementById('btn-toggle-capture');
-    btn.textContent = captureEnabled ? 'Stop Capture' : 'Start Capture';
+    btn.textContent = captureEnabled ? 'Dumping...' : 'Dump Raw';
     btn.style.background = captureEnabled ? 'var(--accent)' : '';
-    document.getElementById('capture-status').textContent = captureEnabled ? 'Capturing' : '';
+    document.getElementById('capture-status').textContent = captureEnabled ? 'Dumping' : '';
 }
 
-// ── Sessions ──
-document.getElementById('btn-start-session').addEventListener('click', async () => {
-    const label = document.getElementById('session-label').value.trim();
-    const resp = await fetch('/api/session/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: label || null })
-    });
-    const session = await resp.json();
-    currentSessionId = session.id;
-    addSessionCard(session);
-});
+// ── Session actions (appear when a session filter is selected) ──
 
-function addSessionCard(session) {
-    const container = document.getElementById('sessions-list');
-    const card = document.createElement('div');
-    card.className = 'session-card';
-    card.id = `session-${session.id}`;
-    const status = session.status === 'Recording'
-        ? '<span style="color:var(--success)">● Recording</span>'
-        : '<span style="color:var(--text-muted)">■ Stopped</span>';
-    card.innerHTML = `
-        <h3>Session: ${esc(session.id)}</h3>
-        <div class="meta">
-            ${status} |
-            Label: ${esc(session.label || '—')} |
-            Started: ${formatTime(session.started_at)} |
-            Requests: ${session.request_ids.length}
-        </div>
-        <div class="actions">
-            ${session.status === 'Recording'
-                ? `<button onclick="stopSession('${session.id}')">Stop</button>`
-                : ''}
-            <button onclick="selectExportSession('${session.id}')">Export</button>
-        </div>
-    `;
-    container.prepend(card);
-}
+async function refreshSessionActions() {
+    const sid = filterSession;
+    const exportBtn = document.getElementById('btn-session-export');
+    const renameBtn = document.getElementById('btn-session-rename');
+    const deleteBtn = document.getElementById('btn-session-delete');
 
-function updateSessionCard(session) {
-    const card = document.getElementById(`session-${session.id}`);
-    if (card) {
-        card.remove();
-        addSessionCard(session);
+    if (!sid) {
+        exportBtn.classList.add('hidden');
+        renameBtn.classList.add('hidden');
+        deleteBtn.classList.add('hidden');
+        return;
     }
+
+    // Fetch session details to get current label
+    let session = null;
+    try {
+        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}`);
+        const data = await resp.json();
+        session = data.session;
+    } catch (e) { /* ignore */ }
+
+    exportBtn.classList.remove('hidden');
+    renameBtn.classList.remove('hidden');
+    deleteBtn.classList.remove('hidden');
+
+    // Export: open links in new tabs
+    exportBtn.onclick = () => {
+        window.open(`/api/session/${encodeURIComponent(sid)}/export?format=json`, '_blank');
+    };
+
+    // Rename
+    renameBtn.onclick = () => {
+        const current = session?.label || sid.substring(0, 8);
+        const label = prompt('New name:', current);
+        if (label === null || label.trim() === '' || label.trim() === current) return;
+        fetch(`/api/session/${encodeURIComponent(sid)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: label.trim() })
+        }).then(() => updateFilterOptions());
+    };
+
+    // Delete
+    deleteBtn.onclick = () => {
+        const name = session?.label || sid.substring(0, 8);
+        if (!confirm(`Delete session "${name}" and all its requests?`)) return;
+        fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'DELETE' }).then(() => {
+            filterSession = '';
+            document.getElementById('filter-session').value = '';
+            refreshSessionActions();
+            applyFiltersAndRender();
+            updateFilterOptions();
+        });
+    };
 }
 
-async function stopSession(id) {
-    await fetch(`/api/session/${id}/stop`, { method: 'POST' });
-    // UI will update via WS SessionStopped message
-}
+// ── Filters ──
+let sessionCache = {}; // session_id → label mapping
 
-function selectExportSession(id) {
-    const panel = document.getElementById('session-export');
-    panel.classList.remove('hidden');
-    panel.dataset.sessionId = id;
-    document.querySelectorAll('#session-export .export-btn').forEach(btn => {
-        btn.onclick = () => {
-            window.open(`/api/session/${id}/export?format=${btn.dataset.format}`, '_blank');
-        };
-    });
-}
-
-// ── Filter ──
 function updateFilterOptions() {
+    // Model filter
     const models = new Set();
     requestRows.forEach(r => { if (r.model) models.add(r.model); });
-    const select = document.getElementById('filter-model');
-    const current = select.value;
-    select.innerHTML = '<option value="">All Models</option>';
+    const modelSelect = document.getElementById('filter-model');
+    const currentModel = modelSelect.value;
+    modelSelect.innerHTML = '<option value="">All Models</option>';
     models.forEach(m => {
-        select.innerHTML += `<option value="${esc(m)}">${esc(m)}</option>`;
+        modelSelect.innerHTML += `<option value="${esc(m)}">${esc(m)}</option>`;
     });
-    select.value = current;
+    modelSelect.value = currentModel;
+
+    // Session filter — fetch labels from API for display names
+    const sessionsInData = new Set();
+    requestRows.forEach(r => { if (r.session_id) sessionsInData.add(r.session_id); });
+
+    Promise.all(
+        Array.from(sessionsInData).map(sid =>
+            fetch(`/api/session/${encodeURIComponent(sid)}`)
+                .then(r => r.json())
+                .then(data => { sessionCache[sid] = data.session?.label || sid.substring(0, 8); })
+                .catch(() => { sessionCache[sid] = sid.substring(0, 8); })
+        )
+    ).then(() => {
+        const sessionSelect = document.getElementById('filter-session');
+        const currentSession = sessionSelect.value;
+        sessionSelect.innerHTML = '<option value="">All Sessions</option>';
+        sessionsInData.forEach(s => {
+            const label = esc(sessionCache[s] || s.substring(0, 8));
+            sessionSelect.innerHTML += `<option value="${esc(s)}">${label} (${esc(s.substring(0, 8))})</option>`;
+        });
+        sessionSelect.value = currentSession;
+    });
+}
+
+function applyFiltersAndRender() {
+    currentPage = 1;
+    renderPage();
 }
 
 document.getElementById('filter-model').addEventListener('change', () => {
-    const model = document.getElementById('filter-model').value;
-    document.querySelectorAll('#requests-tbody tr').forEach(tr => {
-        const req = requestRows.get(tr.id.replace('req-', ''));
-        if (!model || (req && req.model === model)) {
-            tr.style.display = '';
-        } else {
-            tr.style.display = 'none';
-        }
-    });
+    filterModel = document.getElementById('filter-model').value;
+    applyFiltersAndRender();
+});
+
+document.getElementById('filter-session').addEventListener('change', () => {
+    filterSession = document.getElementById('filter-session').value;
+    refreshSessionActions();
+    applyFiltersAndRender();
+});
+
+document.getElementById('filter-time-from').addEventListener('change', () => {
+    filterTimeFrom = document.getElementById('filter-time-from').value;
+    if (filterTimeFrom) filterTimeFrom += ':00';
+    applyFiltersAndRender();
+});
+
+document.getElementById('filter-time-to').addEventListener('change', () => {
+    filterTimeTo = document.getElementById('filter-time-to').value;
+    if (filterTimeTo) filterTimeTo += ':00';
+    applyFiltersAndRender();
+});
+
+// ── Pagination controls ──
+document.getElementById('page-size').addEventListener('change', () => {
+    pageSize = parseInt(document.getElementById('page-size').value);
+    currentPage = 1;
+    renderPage();
+});
+
+document.getElementById('btn-page-prev').addEventListener('click', () => {
+    if (currentPage > 1) {
+        currentPage--;
+        renderPage();
+    }
+});
+
+document.getElementById('btn-page-next').addEventListener('click', () => {
+    const totalPages = Math.max(1, Math.ceil(getFilteredRequests().length / pageSize));
+    if (currentPage < totalPages) {
+        currentPage++;
+        renderPage();
+    }
 });
 
 // ── Utilities ──
@@ -690,7 +752,6 @@ function jsonTreeHTML(value, depth) {
             const v = jsonTreeHTML(item, depth + 1);
             return `<div class="jt-item"><span class="jt-index">${i}: </span>${v}</div>`;
         }).join('');
-
         return `<span class="jt-node jt-array">`
             + `<span class="jt-toggle ${collapsed ? '' : 'expanded'}" data-depth="${depth}">${collapsed ? '+' : '-'}</span>`
             + `<span class="jt-bracket">[</span>`
@@ -704,8 +765,6 @@ function jsonTreeHTML(value, depth) {
         const keys = Object.keys(value);
         if (keys.length === 0) return '<span class="jt-bracket">{}</span>';
         const collapsed = depth >= 2;
-
-        // Build preview from important keys
         const previewParts = [];
         for (const k of IMPORTANT_KEYS) {
             if (k in value) {
@@ -745,26 +804,18 @@ function jsonTreeHTML(value, depth) {
     return String(value);
 }
 
-// Global click handler for JSON tree toggles (event delegation)
 document.addEventListener('click', function(e) {
     const toggle = e.target.closest('.jt-toggle');
     if (!toggle) return;
-
     const node = toggle.parentElement;
     if (!node || !node.classList.contains('jt-node')) return;
-
-    // Find direct children of this node
     const children = node.querySelector('.jt-children');
     const preview = node.querySelector('.jt-preview');
     if (!children) return;
-
     const isExpanding = toggle.textContent === '+';
-
     if (isExpanding) {
-        // Expand this node AND all descendants
         expandAll(node);
     } else {
-        // Collapse this node
         children.classList.add('hidden');
         if (preview) preview.classList.remove('hidden');
         toggle.textContent = '+';
@@ -773,7 +824,6 @@ document.addEventListener('click', function(e) {
 });
 
 function expandAll(node) {
-    // Expand all nested toggles within this node
     const allToggles = node.querySelectorAll('.jt-toggle');
     allToggles.forEach(t => {
         t.textContent = '-';
@@ -803,20 +853,132 @@ function updateRequestCount() {
     document.getElementById('request-count').textContent = `${requestRows.size} requests`;
 }
 
+// ── Selection & delete (event delegation) ──
+document.addEventListener('change', (e) => {
+    if (e.target.classList.contains('row-chk')) {
+        const id = e.target.dataset.id;
+        if (e.target.checked) {
+            selectedIds.add(id);
+        } else {
+            selectedIds.delete(id);
+        }
+        updateSelectionUI();
+    }
+});
+
+document.addEventListener('change', (e) => {
+    if (e.target.id === 'select-all') {
+        const checked = e.target.checked;
+        document.querySelectorAll('.row-chk').forEach(cb => {
+            cb.checked = checked;
+            const id = cb.dataset.id;
+            if (checked) {
+                selectedIds.add(id);
+            } else {
+                selectedIds.delete(id);
+            }
+        });
+        updateSelectionUI();
+    }
+});
+
+document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.btn-delete-row');
+    if (!btn) return;
+    e.stopPropagation();
+    const id = btn.dataset.id;
+    if (!confirm(`Delete request ${id.substring(0, 8)}?`)) return;
+    const resp = await fetch(`/api/request/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (resp.ok) {
+        requestRows.delete(id);
+        selectedIds.delete(id);
+        if (selectedRequestId === id) {
+            selectedRequestId = null;
+            document.getElementById('request-detail').classList.add('hidden');
+        }
+        renderPage();
+        updateFilterOptions();
+        updateRequestCount();
+    }
+});
+
+document.getElementById('btn-delete-selected').addEventListener('click', async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} selected request(s)?`)) return;
+    const ids = Array.from(selectedIds);
+    const resp = await fetch('/api/requests', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids })
+    });
+    if (resp.ok) {
+        ids.forEach(id => requestRows.delete(id));
+        selectedIds.clear();
+        document.getElementById('select-all').checked = false;
+        if (selectedRequestId && ids.includes(selectedRequestId)) {
+            selectedRequestId = null;
+            document.getElementById('request-detail').classList.add('hidden');
+        }
+        renderPage();
+        updateFilterOptions();
+        updateRequestCount();
+    }
+});
+
+function updateSelectionUI() {
+    const count = selectedIds.size;
+    document.getElementById('selected-count').textContent = count;
+    const btn = document.getElementById('btn-delete-selected');
+    if (count > 0) {
+        btn.classList.remove('hidden');
+    } else {
+        btn.classList.add('hidden');
+    }
+    const totalVisible = document.querySelectorAll('.row-chk').length;
+    const selectAll = document.getElementById('select-all');
+    if (count === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+    } else if (count >= totalVisible) {
+        selectAll.checked = true;
+        selectAll.indeterminate = false;
+    } else {
+        selectAll.checked = false;
+        selectAll.indeterminate = true;
+    }
+}
+
 function clearAllTables() {
     requestRows.clear();
+    currentPage = 1;
+    filterModel = '';
+    filterSession = '';
+    filterTimeFrom = '';
+    filterTimeTo = '';
+    document.getElementById('filter-model').value = '';
+    document.getElementById('filter-session').innerHTML = '<option value="">All Sessions</option>';
+    document.getElementById('filter-time-from').value = '';
+    document.getElementById('filter-time-to').value = '';
     document.getElementById('requests-tbody').innerHTML = '';
     document.getElementById('hooks-tbody').innerHTML = '';
     document.getElementById('conversation-timeline').innerHTML = '';
+    updatePagination(0, 1);
+    updateRequestCount();
+    refreshSessionActions();
 }
 
 // ── Init ──
 connect();
-// Fetch MCP destination on load
 fetch('/api/mcp-destination')
     .then(r => r.json())
     .then(data => {
         if (data.destinationUrl) {
             document.getElementById('mcp-destination').value = data.destinationUrl;
         }
+    });
+fetch('/api/capture/status')
+    .then(r => r.json())
+    .then(data => {
+        captureEnabled = data.enabled;
+        updateCaptureButton();
     });

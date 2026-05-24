@@ -1,6 +1,7 @@
 use chrono::Utc;
 use proxy_core::models::{ProxiedRequest, SseEvent};
 use proxy_core::sse::SseParser;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,11 +9,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 /// Side-channel packet capture writer.
-/// When enabled, writes every proxied request/response pair to disk in raw format.
+/// When enabled, writes every proxied request/response pair to disk,
+/// organized by date and session_id:
+///   captures/YYYY-MM-DD/session_<session_id>.txt
 pub struct TeeWriter {
     enabled: Arc<AtomicBool>,
     output_dir: PathBuf,
-    current_file: Mutex<Option<tokio::fs::File>>,
+    /// Map from "YYYY-MM-DD/session_<id>" → open file handle
+    files: Mutex<HashMap<String, tokio::fs::File>>,
 }
 
 impl TeeWriter {
@@ -20,7 +24,7 @@ impl TeeWriter {
         Self {
             enabled,
             output_dir,
-            current_file: Mutex::new(None),
+            files: Mutex::new(HashMap::new()),
         }
     }
 
@@ -32,25 +36,49 @@ impl TeeWriter {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    /// Open a new timestamped capture file.
+    /// No-op: files are now opened on-demand per (date, session_id) in write_exchange.
     pub async fn start_new_file(&self) -> anyhow::Result<()> {
-        tokio::fs::create_dir_all(&self.output_dir).await?;
-        let filename = format!("capture_{}.txt", Utc::now().format("%Y%m%d_%H%M%S"));
-        let path = self.output_dir.join(&filename);
-        let file = tokio::fs::File::create(&path).await?;
-        *self.current_file.lock().await = Some(file);
-        tracing::info!("Capture started → {}", path.display());
         Ok(())
     }
 
-    /// Write a captured request/response pair to the tee file.
+    /// Write a captured request/response pair to the appropriate session file.
     pub async fn write_exchange(&self, request: &ProxiedRequest) {
         if !self.is_enabled() {
             return;
         }
 
-        let mut guard = self.current_file.lock().await;
-        if let Some(ref mut file) = *guard {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let sid = request.session_id.as_deref().unwrap_or("unknown");
+        let key = format!("{}/{}", today, sid);
+
+        let mut files = self.files.lock().await;
+
+        // Open file if not already cached
+        if !files.contains_key(&key) {
+            let dir = self.output_dir.join(&today);
+            if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+                tracing::error!("Failed to create capture dir {}: {}", dir.display(), e);
+                return;
+            }
+            let path = dir.join(format!("session_{}.txt", sid));
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await
+            {
+                Ok(file) => {
+                    tracing::info!("Capture → {}", path.display());
+                    files.insert(key.clone(), file);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to open capture file {}: {}", path.display(), e);
+                    return;
+                }
+            }
+        }
+
+        if let Some(file) = files.get_mut(&key) {
             let content = format_raw_exchange(request);
             let _ = file.write_all(content.as_bytes()).await;
             let _ = file.flush().await;

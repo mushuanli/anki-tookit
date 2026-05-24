@@ -14,7 +14,6 @@
             <a href="#" data-view="conversation">Conversation</a>
             <a href="#" data-view="mcp">MCP Observer</a>
             <a href="#" data-view="hooks">Hooks</a>
-            <a href="#" data-view="sessions">Sessions</a>
         </nav>
         <div class="status-bar">
             <span id="connection-status" class="disconnected">Disconnected</span>
@@ -27,49 +26,77 @@
         <!-- Inspector View -->
         <section id="view-inspector" class="view active">
             <div class="toolbar">
+                <button id="btn-toggle-capture">Dump Raw</button>
+                <button id="btn-delete-selected" class="hidden" style="background:var(--error)">Delete Selected (<span id="selected-count">0</span>)</button>
+                <span class="sep">|</span>
                 <label>Upstream:</label>
                 <select id="upstream-select"></select>
                 <button id="btn-upstream-add" title="Add">+</button>
                 <button id="btn-upstream-edit" title="Edit">&#9998;</button>
                 <button id="btn-upstream-delete" title="Delete" disabled>&#10005;</button>
                 <span id="upstream-url-display" class="upstream-url"></span>
-                <div id="upstream-edit-form" class="inline-edit hidden">
-                    <input type="text" id="upstream-edit-name" placeholder="Name" size="12">
-                    <input type="text" id="upstream-edit-url" placeholder="https://..." size="36">
-                    <input type="password" id="upstream-edit-token" placeholder="Token (optional)" size="22">
-                    <br>
-                    <label class="model-map-label">Model Map:</label>
-                    <textarea id="upstream-edit-modelmap" placeholder="claude-sonnet-4-6 = deepseek-v4-pro&#10;claude-opus-4-6 = deepseek-v4-pro[1m]&#10;claude-haiku-4-5 = deepseek-chat" rows="3" cols="52" spellcheck="false"></textarea>
-                    <br>
-                    <button id="btn-upstream-save">Save</button>
-                    <button id="btn-upstream-cancel">Cancel</button>
-                </div>
+            </div>
+            <div id="upstream-edit-form" class="inline-edit hidden">
+                <input type="text" id="upstream-edit-name" placeholder="Name" size="12">
+                <input type="text" id="upstream-edit-url" placeholder="https://..." size="36">
+                <input type="password" id="upstream-edit-token" placeholder="Token (optional)" size="22">
+                <br>
+                <label class="model-map-label">Model Map:</label>
+                <textarea id="upstream-edit-modelmap" placeholder="claude-sonnet-4-6 = deepseek-v4-pro&#10;claude-opus-4-6 = deepseek-v4-pro[1m]&#10;claude-haiku-4-5 = deepseek-chat" rows="3" cols="52" spellcheck="false"></textarea>
+                <br>
+                <button id="btn-upstream-save">Save</button>
+                <button id="btn-upstream-cancel">Cancel</button>
+            </div>
+            <div class="toolbar filter-row">
+                <label>Session:</label>
+                <select id="filter-session">
+                    <option value="">All Sessions</option>
+                </select>
+                <button id="btn-session-export" class="hidden">Export ▾</button>
+                <button id="btn-session-rename" class="hidden">Rename</button>
+                <button id="btn-session-delete" class="hidden btn-danger">Delete Session</button>
                 <span class="sep">|</span>
-                <button id="btn-clear">Clear All</button>
-                <button id="btn-clear-mcp">Clear MCP</button>
-                <button id="btn-toggle-capture">Start Capture</button>
+                <label>Model:</label>
                 <select id="filter-model">
                     <option value="">All Models</option>
                 </select>
+                <label>From:</label>
+                <input type="datetime-local" id="filter-time-from" step="1">
+                <label>To:</label>
+                <input type="datetime-local" id="filter-time-to" step="1">
             </div>
             <div class="table-container">
                 <table id="requests-table">
                     <thead>
                         <tr>
+                            <th class="col-chk"><input type="checkbox" id="select-all" title="Select all"></th>
                             <th>Time</th>
                             <th>Method</th>
                             <th>Path</th>
                             <th>Status</th>
                             <th>Model</th>
-                            <th>Stream</th>
+                            <th>Session</th>
                             <th>Tokens In</th>
                             <th>Tokens Out</th>
                             <th>Duration</th>
                             <th>TTFT</th>
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody id="requests-tbody"></tbody>
                 </table>
+            </div>
+            <div class="pagination" id="pagination">
+                <span id="page-info">0 requests</span>
+                <select id="page-size">
+                    <option value="20">20 / page</option>
+                    <option value="50" selected>50 / page</option>
+                    <option value="100">100 / page</option>
+                    <option value="200">200 / page</option>
+                </select>
+                <button id="btn-page-prev" disabled>Prev</button>
+                <span id="page-num">Page 1</span>
+                <button id="btn-page-next" disabled>Next</button>
             </div>
             <div id="request-detail" class="detail-panel hidden">
                 <div class="detail-header">
@@ -138,22 +165,6 @@
                     </thead>
                     <tbody id="hooks-tbody"></tbody>
                 </table>
-            </div>
-        </section>
-
-        <!-- Sessions View -->
-        <section id="view-sessions" class="view">
-            <div class="toolbar">
-                <label>Label:</label>
-                <input type="text" id="session-label" placeholder="e.g. debug auth flow" size="30">
-                <button id="btn-start-session">Start Recording</button>
-            </div>
-            <div id="sessions-list"></div>
-            <div id="session-export" class="hidden">
-                <h3>Export Session</h3>
-                <button class="export-btn" data-format="json">Export JSON</button>
-                <button class="export-btn" data-format="har">Export HAR</button>
-                <button class="export-btn" data-format="markdown">Export Markdown</button>
             </div>
         </section>
     </main>

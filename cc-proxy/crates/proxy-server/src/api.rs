@@ -9,7 +9,7 @@ use axum::routing::{get, post, put};
 use axum::Json;
 use proxy_core::config::UpstreamTarget;
 use proxy_core::export::{export_har, export_json, export_markdown};
-use proxy_core::models::{HookEvent, Session, WsMessage};
+use proxy_core::models::{HookEvent, WsMessage};
 use serde::Deserialize;
 
 use crate::AppState;
@@ -23,6 +23,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/api/hook-event/:id", put(update_hook_event_by_id))
         .route("/api/clear", post(clear_all))
         .route("/api/clear-mcp", post(clear_mcp))
+        .route("/api/clear-hooks", post(clear_hooks))
         .route("/api/mcp-destination", get(get_mcp_dest).put(set_mcp_dest))
         .route("/api/upstream", get(get_upstream).put(set_upstream))
         .route("/api/upstreams", get(list_upstreams).post(add_upstream))
@@ -32,15 +33,15 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             put(update_upstream).delete(delete_upstream),
         )
         .route("/api/health", get(health))
+        // Sessions
         .route("/api/sessions", get(list_sessions))
-        .route("/api/session/start", post(start_session))
-        .route("/api/session/:id", get(get_session))
-        .route("/api/session/:id/stop", post(stop_session))
+        .route("/api/session/:id", get(get_session).put(rename_session).delete(delete_session))
         .route("/api/session/:id/export", get(export_session))
-        .route("/api/request/:id", get(get_request))
+        // Requests
+        .route("/api/request/:id", get(get_request).delete(delete_single_request))
+        .route("/api/requests", get(list_requests).delete(delete_requests_batch))
         .route("/api/capture", post(toggle_capture))
         .route("/api/capture/status", get(capture_status))
-        .route("/api/requests", get(list_requests))
         // Static files + SPA fallback
         .fallback(get(serve_static))
         .with_state(state)
@@ -65,7 +66,6 @@ async fn serve_static(uri: Uri) -> Response<Body> {
                 .body(Body::from(file.data.into_owned()))
                 .unwrap()
         }
-        // SPA fallback: return index.html for unknown paths
         None => match WwwRoot::get("index.html") {
             Some(file) => Response::builder()
                 .status(StatusCode::OK)
@@ -95,24 +95,16 @@ async fn hook_event(
         payload["cwd"].as_str().unwrap_or("").to_string(),
     );
 
-    event.permission_mode = payload["permissionMode"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    event.transcript_path = payload["transcriptPath"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    event.permission_mode = payload["permissionMode"].as_str().unwrap_or("").to_string();
+    event.transcript_path = payload["transcriptPath"].as_str().unwrap_or("").to_string();
     event.hook_input = payload["hookInput"].clone();
     if let Some(env) = payload["environmentVariables"].as_object() {
         for (k, v) in env {
-            event
-                .environment_variables
-                .insert(k.clone(), v.as_str().unwrap_or("").to_string());
+            event.environment_variables.insert(k.clone(), v.as_str().unwrap_or("").to_string());
         }
     }
 
-    let _ = state.hook_store.push(event.clone());
+    let _ = state.db.insert_hook(&event);
     let _ = state.broadcast_send(WsMessage::NewHook(event.clone()));
 
     Json(serde_json::json!({
@@ -127,7 +119,8 @@ async fn update_hook_event(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let id = payload["id"].as_str().unwrap_or("");
-    if let Some(mut event) = state.hook_store.get_by_id(id) {
+    let hooks = state.db.list_hooks().unwrap_or_default();
+    if let Some(mut event) = hooks.into_iter().find(|h| h.id == id) {
         if let Some(exit_code) = payload["exitCode"].as_i64() {
             event.exit_code = exit_code as i32;
         }
@@ -137,7 +130,7 @@ async fn update_hook_event(
         if let Some(stderr) = payload["stderr"].as_str() {
             event.stderr = stderr.to_string();
         }
-        let _ = state.hook_store.push(event.clone());
+        let _ = state.db.insert_hook(&event);
     }
     Json(serde_json::json!({"ok": true}))
 }
@@ -147,7 +140,8 @@ async fn update_hook_event_by_id(
     Path(id): Path<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(mut event) = state.hook_store.get_by_id(&id) {
+    let hooks = state.db.list_hooks().unwrap_or_default();
+    if let Some(mut event) = hooks.into_iter().find(|h| h.id == id) {
         if let Some(exit_code) = payload["exitCode"].as_i64() {
             event.exit_code = exit_code as i32;
         }
@@ -157,7 +151,7 @@ async fn update_hook_event_by_id(
         if let Some(stderr) = payload["stderr"].as_str() {
             event.stderr = stderr.to_string();
         }
-        let _ = state.hook_store.push(event.clone());
+        let _ = state.db.insert_hook(&event);
     }
     Json(serde_json::json!({"ok": true}))
 }
@@ -165,15 +159,20 @@ async fn update_hook_event_by_id(
 // ── Clear ──
 
 async fn clear_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.request_store.clear();
-    state.hook_store.clear();
+    let _ = state.db.clear_requests();
+    let _ = state.db.clear_hooks();
     let _ = state.broadcast_send(WsMessage::Cleared);
     Json(serde_json::json!({"ok": true}))
 }
 
 async fn clear_mcp(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.mcp_store.clear();
+    let _ = state.db.clear_mcp();
     let _ = state.broadcast_send(WsMessage::McpCleared);
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn clear_hooks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let _ = state.db.clear_hooks();
     Json(serde_json::json!({"ok": true}))
 }
 
@@ -188,14 +187,11 @@ async fn set_mcp_dest(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let new_dest = payload["destinationUrl"]
-        .as_str()
-        .map(|s| s.to_string());
+    let new_dest = payload["destinationUrl"].as_str().map(|s| s.to_string());
     {
         let mut dest = state.mcp_destination.write().await;
         *dest = new_dest.clone();
     }
-    // Notify clients (YARP-like config reload)
     let _ = state.broadcast_send(WsMessage::McpConfigChanged {
         destination_url: new_dest,
     });
@@ -204,7 +200,6 @@ async fn set_mcp_dest(
 
 // ── Upstream targets ──
 
-/// Build UpstreamChanged message from current state.
 async fn upstream_changed_msg(state: &AppState) -> WsMessage {
     WsMessage::UpstreamChanged {
         active_url: state.upstream_target.read().await.clone(),
@@ -224,7 +219,6 @@ async fn set_upstream(
 ) -> impl IntoResponse {
     if let Some(input_url) = payload["targetUrl"].as_str() {
         let input_url = input_url.trim_end_matches('/').to_string();
-        // Check if URL matches a named upstream → activate it
         let upstreams = state.upstreams.read().await.clone();
         if let Some(u) = upstreams.iter().find(|u| u.url == input_url) {
             let name = u.name.clone();
@@ -235,7 +229,6 @@ async fn set_upstream(
             let msg = upstream_changed_msg(&state).await;
             let _ = state.broadcast_send(msg);
         } else {
-            // Ad-hoc: memory only, no persistence
             *state.upstream_target.write().await = input_url.clone();
             *state.active_upstream.write().await = String::new();
             let msg = upstream_changed_msg(&state).await;
@@ -300,11 +293,9 @@ async fn update_upstream(
         Some(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
         _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "URL is required"}))).into_response(),
     };
-    // token: if key is present, update (empty string = clear)
     let token_update = payload.get("token").map(|v| {
         v.as_str().filter(|t| !t.is_empty()).map(|t| t.to_string())
     });
-    // model_map: if key is present, update (empty object = clear)
     let model_map_update: Option<HashMap<String, String>> = payload.get("model_map").map(|v| {
         v.as_object()
             .map(|obj| {
@@ -330,7 +321,6 @@ async fn update_upstream(
     }
     drop(upstreams);
 
-    // Keep upstream_target in sync if this is the active upstream
     if is_active {
         *state.upstream_target.write().await = new_url;
     }
@@ -357,7 +347,6 @@ async fn delete_upstream(
     let was_active = upstreams[idx].name == *state.active_upstream.read().await;
     upstreams.remove(idx);
 
-    // If we deleted the active one, switch to the first remaining
     if was_active {
         let new_active = upstreams[0].clone();
         *state.active_upstream.write().await = new_active.name.clone();
@@ -395,76 +384,100 @@ async fn activate_upstream(
 // ── Health ──
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let req_count = state.db.count_requests().unwrap_or(0);
+    let hook_count = state.db.list_hooks().map(|v| v.len() as i64).unwrap_or(0);
+    let mcp_count = state.db.list_mcp().map(|v| v.len() as i64).unwrap_or(0);
     Json(serde_json::json!({
         "status": "ok",
-        "requests": state.request_store.len(),
-        "hooks": state.hook_store.len(),
-        "mcp": state.mcp_store.len(),
+        "requests": req_count,
+        "hooks": hook_count,
+        "mcp": mcp_count,
     }))
 }
 
 // ── Sessions ──
 
-async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let sessions = state.sessions.read().await;
-    Json(serde_json::json!(sessions.clone()))
-}
-
 #[derive(Deserialize)]
-struct StartSessionPayload {
-    label: Option<String>,
+struct SessionQuery {
+    q: Option<String>,
 }
 
-async fn start_session(
+async fn list_sessions(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<StartSessionPayload>,
+    Query(query): Query<SessionQuery>,
 ) -> impl IntoResponse {
-    let session = Session::new(payload.label);
-    let _ = state.broadcast_send(WsMessage::SessionStarted(session.clone()));
-    state.sessions.write().await.push(session.clone());
-    Json(serde_json::json!(session))
+    let sessions = state.db.list_sessions(query.q.as_deref()).unwrap_or_default();
+    Json(serde_json::json!(sessions))
 }
 
 async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let sessions = state.sessions.read().await;
-    if let Some(session) = sessions.iter().find(|s| s.id == id) {
-        let requests: Vec<_> = session
-            .request_ids
-            .iter()
-            .filter_map(|rid| state.request_store.get_by_id(rid))
-            .collect();
-        Json(serde_json::json!({
-            "session": session,
-            "requests": requests
-        }))
-        .into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
+    match state.db.get_session(&id) {
+        Ok(Some(session)) => {
+            let requests: Vec<_> = session
+                .request_ids
+                .iter()
+                .filter_map(|rid| state.db.get_request(rid).ok().flatten())
+                .collect();
+            Json(serde_json::json!({
+                "session": session,
+                "requests": requests
+            }))
             .into_response()
+        }
+        _ => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
+                .into_response()
+        }
     }
 }
 
-async fn stop_session(
+#[derive(Deserialize)]
+struct RenameSessionPayload {
+    label: String,
+}
+
+async fn rename_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<RenameSessionPayload>,
+) -> impl IntoResponse {
+    match state.db.rename_session(&id, &payload.label) {
+        Ok(true) => {
+            if let Ok(Some(session)) = state.db.get_session(&id) {
+                let _ = state.broadcast_send(WsMessage::SessionUpdated {
+                    request_id: session.id.clone(),
+                });
+            }
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
+        Ok(false) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
+                .into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                .into_response()
+        }
+    }
+}
+
+async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let mut sessions = state.sessions.write().await;
-    if let Some(session) = sessions.iter_mut().find(|s| s.id == id) {
-        session.stop();
-        let _ = state.broadcast_send(WsMessage::SessionStopped(session.clone()));
-        Json(serde_json::json!(session.clone())).into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response()
+    match state.db.delete_session(&id) {
+        Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(false) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
+                .into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                .into_response()
+        }
     }
 }
 
@@ -478,23 +491,18 @@ async fn export_session(
     Path(id): Path<String>,
     Query(query): Query<ExportQuery>,
 ) -> impl IntoResponse {
-    let sessions = state.sessions.read().await;
-    let session = match sessions.iter().find(|s| s.id == id) {
-        Some(s) => s.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Session not found"})),
-            )
+    let session = match state.db.get_session(&id) {
+        Ok(Some(s)) => s,
+        _ => {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
                 .into_response();
         }
     };
 
-    // Resolve requests
     let requests: Vec<_> = session
         .request_ids
         .iter()
-        .filter_map(|rid| state.request_store.get_by_id(rid))
+        .filter_map(|rid| state.db.get_request(rid).ok().flatten())
         .collect();
 
     let format = query.format.as_deref().unwrap_or("json");
@@ -553,26 +561,80 @@ async fn export_session(
     }
 }
 
-// ── Request detail ──
+// ── Requests ──
+
+#[derive(Deserialize)]
+struct ListRequestsQuery {
+    session_id: Option<String>,
+    q: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn list_requests(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListRequestsQuery>,
+) -> impl IntoResponse {
+    let requests = state
+        .db
+        .list_requests(
+            query.session_id.as_deref(),
+            query.q.as_deref(),
+            query.from.as_deref(),
+            query.to.as_deref(),
+            query.limit,
+        )
+        .unwrap_or_default();
+    Json(serde_json::json!(requests))
+}
 
 async fn get_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Some(req) = state.request_store.get_by_id(&id) {
-        Json(serde_json::json!(req)).into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Request not found"})),
-        )
-            .into_response()
+    match state.db.get_request(&id) {
+        Ok(Some(req)) => Json(serde_json::json!(req)).into_response(),
+        _ => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Request not found"})))
+                .into_response()
+        }
     }
 }
 
-async fn list_requests(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let requests = state.request_store.get_all();
-    Json(serde_json::json!(requests))
+async fn delete_single_request(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.db.delete_request(&id) {
+        Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(false) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Request not found"})))
+                .into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteRequestsBody {
+    ids: Vec<String>,
+}
+
+async fn delete_requests_batch(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DeleteRequestsBody>,
+) -> impl IntoResponse {
+    match state.db.delete_requests(&payload.ids) {
+        Ok(n) => Json(serde_json::json!({"ok": true, "deleted": n})).into_response(),
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                .into_response()
+        }
+    }
 }
 
 // ── Tee writer (packet capture) ──
