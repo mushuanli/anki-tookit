@@ -328,6 +328,16 @@ td.status-5xx { color: var(--error); }
     overflow-y: auto;
 }
 
+.tl-thinking {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+.tl-tool {
+    color: var(--accent2);
+    font-weight: 600;
+}
+
 /* Sessions */
 .session-card {
     background: var(--bg-panel);

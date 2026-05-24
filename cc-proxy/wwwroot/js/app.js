@@ -336,12 +336,18 @@ function addToTimeline(item) {
             <div class="timeline-body">${item.response_body || item.request_body || ''}</div>
         `;
     } else {
+        const model = item.model || '—';
+        const tokens = item.input_tokens != null ? `${item.input_tokens}→${item.output_tokens || 0}t` : '';
+        const content = item.content_text || item.response_body || item.request_body || '';
+        const formatted = esc(content)
+            .replace(/\[Thinking\]/g, '<span class="tl-thinking">[Thinking]</span>')
+            .replace(/\[Tool Use\]/g, '<span class="tl-tool">[Tool Use]</span>');
         div.innerHTML = `
             <div class="timeline-header">
-                <span>${esc(item.method)} ${esc(item.path)} — ${item.status_code || '...'}</span>
+                <span>${esc(item.method)} ${esc(item.path)} — ${item.status_code || '...'} | ${esc(model)} | ${tokens}</span>
                 <span>${formatTime(item.timestamp)} | ${item.duration_ms || 0}ms</span>
             </div>
-            <div class="timeline-body">${item.response_body || item.request_body || ''}</div>
+            <div class="timeline-body">${formatted}</div>
         `;
     }
     timeline.prepend(div);
