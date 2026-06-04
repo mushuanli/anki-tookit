@@ -29,7 +29,7 @@ pub struct TierRule {
 
 impl TierRule {
     pub fn is_active(&self) -> bool {
-        !self.provider.is_empty() && !self.model.is_empty()
+        !self.provider.is_empty()
     }
 
     fn matches(&self, model_lower: &str) -> bool {
@@ -65,14 +65,34 @@ pub struct UpstreamConfig {
 
 impl UpstreamConfig {
     /// Resolve (provider_name, target_model) for a given request model name.
+    /// If a tier matches but its `model` is empty, the original request model
+    /// is passed through unchanged (useful when only routing to a different
+    /// provider without renaming the model).
     /// Returns empty strings if nothing is configured.
     pub fn resolve(&self, request_model: &str) -> (String, String) {
         let lower = request_model.to_lowercase();
         for rule in [&self.high, &self.mid, &self.low].into_iter().flatten() {
             if rule.matches(&lower) {
-                return (rule.provider.clone(), rule.model.clone());
+                let target = if rule.model.is_empty() {
+                    request_model.to_string()
+                } else {
+                    rule.model.clone()
+                };
+                tracing::info!(
+                    target = %target,
+                    provider = %rule.provider,
+                    request_model = %request_model,
+                    "upstream tier matched"
+                );
+                return (rule.provider.clone(), target);
             }
         }
+        tracing::info!(
+            provider = %self.default_provider,
+            model = %self.default_model,
+            request_model = %request_model,
+            "upstream fallback to default"
+        );
         (self.default_provider.clone(), self.default_model.clone())
     }
 }
