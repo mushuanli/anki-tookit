@@ -91,6 +91,9 @@ impl UpstreamConfig {
             provider = %self.default_provider,
             model = %self.default_model,
             request_model = %request_model,
+            has_high = self.high.is_some(),
+            has_mid = self.mid.is_some(),
+            has_low = self.low.is_some(),
             "upstream fallback to default"
         );
         (self.default_provider.clone(), self.default_model.clone())
@@ -191,5 +194,125 @@ impl Default for AppConfig {
                 level: default_log_level(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_config_toml_roundtrip() {
+        // Simulate the exact format persist_config() writes via toml::Value API
+        let cfg = UpstreamConfig {
+            name: "production".into(),
+            high: Some(TierRule {
+                keywords: vec!["opus".into()],
+                provider: "deepseek".into(),
+                model: "".into(),
+            }),
+            mid: Some(TierRule {
+                keywords: vec!["sonnet".into()],
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            }),
+            low: None,
+            default_provider: "deepseek".into(),
+            default_model: "deepseek-v4-pro".into(),
+        };
+
+        // Round 1: serde serialize → toml string
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        println!("=== Serde TOML ===\n{}", toml_str);
+
+        // Round 2: parse back with serde
+        let cfg2: UpstreamConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(cfg2.name, "production");
+        assert!(cfg2.high.is_some());
+        assert_eq!(cfg2.high.as_ref().unwrap().keywords, vec!["opus"]);
+        assert!(cfg2.high.as_ref().unwrap().model.is_empty());
+        assert!(cfg2.mid.is_some());
+        assert_eq!(cfg2.mid.as_ref().unwrap().model, "deepseek-v4-pro");
+        assert!(cfg2.low.is_none());
+
+        // Round 3: build via toml::Value API (simulating persist_config)
+        fn tier_rule_to_toml_value(rule: &TierRule) -> toml::Value {
+            let mut t = toml::value::Table::new();
+            t.insert("keywords".into(), toml::Value::Array(
+                rule.keywords.iter().map(|s| toml::Value::String(s.clone())).collect()
+            ));
+            t.insert("provider".into(), toml::Value::String(rule.provider.clone()));
+            t.insert("model".into(), toml::Value::String(rule.model.clone()));
+            toml::Value::Table(t)
+        }
+
+        let mut upstream_table = toml::value::Table::new();
+        upstream_table.insert("name".into(), toml::Value::String("production".into()));
+        upstream_table.insert("high".into(), tier_rule_to_toml_value(cfg.high.as_ref().unwrap()));
+        upstream_table.insert("mid".into(), tier_rule_to_toml_value(cfg.mid.as_ref().unwrap()));
+        upstream_table.insert("default_provider".into(), toml::Value::String("deepseek".into()));
+        upstream_table.insert("default_model".into(), toml::Value::String("deepseek-v4-pro".into()));
+
+        let mut doc = toml::value::Table::new();
+        let mut proxy = toml::value::Table::new();
+        proxy.insert("upstreams".into(), toml::Value::Array(vec![toml::Value::Table(upstream_table)]));
+        doc.insert("proxy".into(), toml::Value::Table(proxy));
+
+        let toml_str2 = toml::to_string_pretty(&doc).unwrap();
+        println!("=== Value-API TOML ===\n{}", toml_str2);
+
+        // Parse back via wrapper structs (same as main.rs Config → ProxyConfig)
+        #[derive(Deserialize)]
+        struct DocProxy { upstreams: Vec<UpstreamConfig> }
+        #[derive(Deserialize)]
+        struct Doc { proxy: DocProxy }
+        let doc3: Doc = toml::from_str(&toml_str2).unwrap();
+        assert_eq!(doc3.proxy.upstreams.len(), 1);
+        let u = &doc3.proxy.upstreams[0];
+        assert_eq!(u.name, "production");
+        assert!(u.high.is_some());
+        assert_eq!(u.high.as_ref().unwrap().keywords, vec!["opus"]);
+        assert!(u.mid.is_some());
+        assert!(u.low.is_none());
+    }
+
+    #[test]
+    fn tier_matching_works() {
+        let cfg = UpstreamConfig {
+            name: "test".into(),
+            high: Some(TierRule {
+                keywords: vec!["opus".into()],
+                provider: "p-high".into(),
+                model: "m-high".into(),
+            }),
+            mid: Some(TierRule {
+                keywords: vec!["sonnet".into()],
+                provider: "p-mid".into(),
+                model: "m-mid".into(),
+            }),
+            low: None,
+            default_provider: "p-default".into(),
+            default_model: "m-default".into(),
+        };
+        assert_eq!(cfg.resolve("sonnet-v4-pro"), ("p-mid".into(), "m-mid".into()));
+        assert_eq!(cfg.resolve("opus-v4-pro[1m]"), ("p-high".into(), "m-high".into()));
+        assert_eq!(cfg.resolve("gpt-4"), ("p-default".into(), "m-default".into()));
+    }
+
+    #[test]
+    fn tier_pass_through_model() {
+        let cfg = UpstreamConfig {
+            name: "test".into(),
+            high: Some(TierRule {
+                keywords: vec!["opus".into()],
+                provider: "p-high".into(),
+                model: "".into(),
+            }),
+            mid: None,
+            low: None,
+            default_provider: "".into(),
+            default_model: "".into(),
+        };
+        assert_eq!(cfg.resolve("opus-v4-pro[1m]"), ("p-high".into(), "opus-v4-pro[1m]".into()));
     }
 }

@@ -12,3 +12,6 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+[dev-dependencies]
+toml = "0.8"
