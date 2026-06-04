@@ -253,7 +253,10 @@ async fn main() -> anyhow::Result<()> {
     for u in &config.proxy.upstreams {
         let tier_info = |rule: &Option<TierRule>| -> String {
             match rule {
-                Some(r) => format!("{}→{}/{}", r.keywords.join(","), r.provider, r.model),
+                Some(r) => {
+                    let active = if r.is_active() { "" } else { " (inactive)" };
+                    format!("{}→{}/{}{}", r.keywords.join(","), r.provider, r.model, active)
+                }
                 None => "-".into(),
             }
         };

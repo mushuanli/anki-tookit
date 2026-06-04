@@ -28,8 +28,11 @@ pub struct TierRule {
 }
 
 impl TierRule {
+    /// A tier is active only if a provider is selected AND at least one
+    /// non-empty keyword is configured.
     pub fn is_active(&self) -> bool {
         !self.provider.is_empty()
+            && self.keywords.iter().any(|kw| !kw.is_empty())
     }
 
     fn matches(&self, model_lower: &str) -> bool {

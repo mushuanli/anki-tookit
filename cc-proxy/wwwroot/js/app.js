@@ -642,9 +642,10 @@ function openUpstreamEdit(name) {
     document.getElementById('ue-name').disabled = !!u;
 
     // Fill tiers
-    fillTierForm('high', u?.high);
-    fillTierForm('mid', u?.mid);
-    fillTierForm('low', u?.low);
+    const defaults = u ? {} : { high: 'opus', mid: 'sonnet', low: 'haiku' };
+    fillTierForm('high', u?.high, defaults.high);
+    fillTierForm('mid', u?.mid, defaults.mid);
+    fillTierForm('low', u?.low, defaults.low);
 
     // Default
     document.getElementById('ue-default-provider').value = u?.default_provider || '';
@@ -656,8 +657,8 @@ function openUpstreamEdit(name) {
     document.getElementById('ue-name').focus();
 }
 
-function fillTierForm(tier, rule) {
-    document.getElementById(`ue-${tier}-kw`).value = rule ? rule.keywords.join(', ') : '';
+function fillTierForm(tier, rule, defaultKw) {
+    document.getElementById(`ue-${tier}-kw`).value = rule ? rule.keywords.join(', ') : (defaultKw || '');
     document.getElementById(`ue-${tier}-provider`).value = rule ? rule.provider : '';
     document.getElementById(`ue-${tier}-model`).value = rule ? rule.model : '';
 }
