@@ -251,18 +251,18 @@ async fn main() -> anyhow::Result<()> {
         config.proxy.active_upstream,
     );
     for u in &config.proxy.upstreams {
-        let tiers: Vec<&str> = [
-            u.high.as_ref().map(|_| "high"),
-            u.mid.as_ref().map(|_| "mid"),
-            u.low.as_ref().map(|_| "low"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let tier_info = |rule: &Option<TierRule>| -> String {
+            match rule {
+                Some(r) => format!("{}→{}/{}", r.keywords.join(","), r.provider, r.model),
+                None => "-".into(),
+            }
+        };
         tracing::info!(
-            "  upstream '{}' tiers=[{}] default→{}/{}",
+            "  upstream '{}' H:[{}] M:[{}] L:[{}] default→{}/{}",
             u.name,
-            tiers.join(", "),
+            tier_info(&u.high),
+            tier_info(&u.mid),
+            tier_info(&u.low),
             u.default_provider,
             u.default_model,
         );
