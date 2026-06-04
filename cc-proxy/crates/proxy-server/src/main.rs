@@ -235,6 +235,39 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState::new(config.clone(), config_path));
 
+    // ── Startup diagnostics ──
+    tracing::info!("{} provider(s) configured", config.proxy.providers.len());
+    for p in &config.proxy.providers {
+        tracing::info!(
+            "  provider '{}' → {} (models: {})",
+            p.name,
+            p.url,
+            p.models.len()
+        );
+    }
+    tracing::info!(
+        "{} upstream(s) configured, active = '{}'",
+        config.proxy.upstreams.len(),
+        config.proxy.active_upstream,
+    );
+    for u in &config.proxy.upstreams {
+        let tiers: Vec<&str> = [
+            u.high.as_ref().map(|_| "high"),
+            u.mid.as_ref().map(|_| "mid"),
+            u.low.as_ref().map(|_| "low"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        tracing::info!(
+            "  upstream '{}' tiers=[{}] default→{}/{}",
+            u.name,
+            tiers.join(", "),
+            u.default_provider,
+            u.default_model,
+        );
+    }
+
     let listen_addr = &config.server.listen_address;
 
     let dashboard_router = api::build_router(state.clone());
