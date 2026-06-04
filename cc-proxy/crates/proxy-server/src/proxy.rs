@@ -45,7 +45,8 @@ fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> 
         let key = k.as_str().to_lowercase();
         if matches!(
             key.as_str(),
-            "host" | "connection" | "transfer-encoding" | "accept-encoding"
+            "host" | "connection" | "transfer-encoding"
+                | "content-length" | "accept-encoding"
                 | "proxy-connection" | "proxy-authorization"
         ) {
             continue;
