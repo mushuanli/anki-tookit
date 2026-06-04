@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -7,7 +6,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Json;
-use proxy_core::config::UpstreamTarget;
+use proxy_core::config::{Provider, TierRule, UpstreamConfig};
 use proxy_core::export::{export_har, export_json, export_markdown};
 use proxy_core::models::{HookEvent, WsMessage};
 use serde::Deserialize;
@@ -16,33 +15,46 @@ use crate::AppState;
 
 pub fn build_router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
-        // WebSocket upgrade (must be before fallback)
+        // WebSocket
         .route("/ws", get(crate::ws::ws_handler))
-        // API routes
+        // Hooks
         .route("/api/hook-event", post(hook_event).put(update_hook_event))
         .route("/api/hook-event/:id", put(update_hook_event_by_id))
+        // Clear
         .route("/api/clear", post(clear_all))
         .route("/api/clear-mcp", post(clear_mcp))
         .route("/api/clear-hooks", post(clear_hooks))
+        // MCP
         .route("/api/mcp-destination", get(get_mcp_dest).put(set_mcp_dest))
-        .route("/api/upstream", get(get_upstream).put(set_upstream))
+        // Providers CRUD
+        .route("/api/providers", get(list_providers).post(add_provider))
+        .route(
+            "/api/providers/:name",
+            put(update_provider).delete(delete_provider),
+        )
+        // Upstreams CRUD
         .route("/api/upstreams", get(list_upstreams).post(add_upstream))
         .route("/api/upstreams/:name/activate", post(activate_upstream))
         .route(
             "/api/upstreams/:name",
             put(update_upstream).delete(delete_upstream),
         )
+        // Health
         .route("/api/health", get(health))
         // Sessions
         .route("/api/sessions", get(list_sessions))
-        .route("/api/session/:id", get(get_session).put(rename_session).delete(delete_session))
+        .route(
+            "/api/session/:id",
+            get(get_session).put(rename_session).delete(delete_session),
+        )
         .route("/api/session/:id/export", get(export_session))
         // Requests
         .route("/api/request/:id", get(get_request).delete(delete_single_request))
         .route("/api/requests", get(list_requests).delete(delete_requests_batch))
+        // Capture
         .route("/api/capture", post(toggle_capture))
         .route("/api/capture/status", get(capture_status))
-        // Static files + SPA fallback
+        // Static files
         .fallback(get(serve_static))
         .with_state(state)
 }
@@ -63,6 +75,7 @@ async fn serve_static(uri: Uri) -> Response<Body> {
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", mime.as_ref())
+                .header("cache-control", "no-cache, no-store, must-revalidate")
                 .body(Body::from(file.data.into_owned()))
                 .unwrap()
         }
@@ -70,6 +83,7 @@ async fn serve_static(uri: Uri) -> Response<Body> {
             Some(file) => Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/html; charset=utf-8")
+                .header("cache-control", "no-cache, no-store, must-revalidate")
                 .body(Body::from(file.data.into_owned()))
                 .unwrap(),
             None => Response::builder()
@@ -80,7 +94,7 @@ async fn serve_static(uri: Uri) -> Response<Body> {
     }
 }
 
-// ── Hook event handlers ──
+// ── Hook events ──
 
 async fn hook_event(
     State(state): State<Arc<AppState>>,
@@ -94,24 +108,19 @@ async fn hook_event(
         payload["sessionId"].as_str().unwrap_or("").to_string(),
         payload["cwd"].as_str().unwrap_or("").to_string(),
     );
-
     event.permission_mode = payload["permissionMode"].as_str().unwrap_or("").to_string();
     event.transcript_path = payload["transcriptPath"].as_str().unwrap_or("").to_string();
     event.hook_input = payload["hookInput"].clone();
     if let Some(env) = payload["environmentVariables"].as_object() {
         for (k, v) in env {
-            event.environment_variables.insert(k.clone(), v.as_str().unwrap_or("").to_string());
+            event
+                .environment_variables
+                .insert(k.clone(), v.as_str().unwrap_or("").to_string());
         }
     }
-
     let _ = state.db.insert_hook(&event);
     let _ = state.broadcast_send(WsMessage::NewHook(event.clone()));
-
-    Json(serde_json::json!({
-        "exitCode": event.exit_code,
-        "stdout": event.stdout,
-        "stderr": event.stderr,
-    }))
+    Json(serde_json::json!({"exitCode": event.exit_code, "stdout": event.stdout, "stderr": event.stderr}))
 }
 
 async fn update_hook_event(
@@ -121,15 +130,7 @@ async fn update_hook_event(
     let id = payload["id"].as_str().unwrap_or("");
     let hooks = state.db.list_hooks().unwrap_or_default();
     if let Some(mut event) = hooks.into_iter().find(|h| h.id == id) {
-        if let Some(exit_code) = payload["exitCode"].as_i64() {
-            event.exit_code = exit_code as i32;
-        }
-        if let Some(stdout) = payload["stdout"].as_str() {
-            event.stdout = stdout.to_string();
-        }
-        if let Some(stderr) = payload["stderr"].as_str() {
-            event.stderr = stderr.to_string();
-        }
+        apply_hook_update(&mut event, &payload);
         let _ = state.db.insert_hook(&event);
     }
     Json(serde_json::json!({"ok": true}))
@@ -142,18 +143,22 @@ async fn update_hook_event_by_id(
 ) -> impl IntoResponse {
     let hooks = state.db.list_hooks().unwrap_or_default();
     if let Some(mut event) = hooks.into_iter().find(|h| h.id == id) {
-        if let Some(exit_code) = payload["exitCode"].as_i64() {
-            event.exit_code = exit_code as i32;
-        }
-        if let Some(stdout) = payload["stdout"].as_str() {
-            event.stdout = stdout.to_string();
-        }
-        if let Some(stderr) = payload["stderr"].as_str() {
-            event.stderr = stderr.to_string();
-        }
+        apply_hook_update(&mut event, &payload);
         let _ = state.db.insert_hook(&event);
     }
     Json(serde_json::json!({"ok": true}))
+}
+
+fn apply_hook_update(event: &mut HookEvent, payload: &serde_json::Value) {
+    if let Some(code) = payload["exitCode"].as_i64() {
+        event.exit_code = code as i32;
+    }
+    if let Some(s) = payload["stdout"].as_str() {
+        event.stdout = s.to_string();
+    }
+    if let Some(s) = payload["stderr"].as_str() {
+        event.stderr = s.to_string();
+    }
 }
 
 // ── Clear ──
@@ -176,7 +181,7 @@ async fn clear_hooks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({"ok": true}))
 }
 
-// ── MCP configuration ──
+// ── MCP ──
 
 async fn get_mcp_dest(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let dest = state.mcp_destination.read().await.clone();
@@ -187,65 +192,104 @@ async fn set_mcp_dest(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let new_dest = payload["destinationUrl"].as_str().map(|s| s.to_string());
-    {
-        let mut dest = state.mcp_destination.write().await;
-        *dest = new_dest.clone();
-    }
-    let _ = state.broadcast_send(WsMessage::McpConfigChanged {
-        destination_url: new_dest,
-    });
+    let new_dest = payload["destinationUrl"].as_str().map(String::from);
+    *state.mcp_destination.write().await = new_dest.clone();
+    let _ = state.broadcast_send(WsMessage::McpConfigChanged { destination_url: new_dest });
     Json(serde_json::json!({"ok": true}))
 }
 
-// ── Upstream targets ──
+// ── Providers CRUD ──
 
-async fn upstream_changed_msg(state: &AppState) -> WsMessage {
-    WsMessage::UpstreamChanged {
-        active_url: state.upstream_target.read().await.clone(),
-        upstreams: state.upstream_info_list().await,
-    }
+async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "providers": state.provider_info_list().await
+    }))
 }
 
-async fn get_upstream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let url = state.upstream_target.read().await.clone();
-    let name = state.active_upstream.read().await.clone();
-    Json(serde_json::json!({"targetUrl": url, "name": name}))
-}
-
-async fn set_upstream(
+async fn add_provider(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Some(input_url) = payload["targetUrl"].as_str() {
-        let input_url = input_url.trim_end_matches('/').to_string();
-        let upstreams = state.upstreams.read().await.clone();
-        if let Some(u) = upstreams.iter().find(|u| u.url == input_url) {
-            let name = u.name.clone();
-            drop(upstreams);
-            *state.active_upstream.write().await = name;
-            *state.upstream_target.write().await = input_url.clone();
-            state.persist_upstreams().await;
-            let msg = upstream_changed_msg(&state).await;
-            let _ = state.broadcast_send(msg);
-        } else {
-            *state.upstream_target.write().await = input_url.clone();
-            *state.active_upstream.write().await = String::new();
-            let msg = upstream_changed_msg(&state).await;
-            let _ = state.broadcast_send(msg);
-        }
+) -> Response<Body> {
+    let name = match payload["name"].as_str().filter(|s| !s.is_empty()) {
+        Some(n) => n.to_string(),
+        None => return bad_request("Name is required"),
+    };
+    let url = match payload["url"].as_str().filter(|s| !s.is_empty()) {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => return bad_request("URL is required"),
+    };
+    let token = payload["token"].as_str().filter(|s| !s.is_empty()).map(String::from);
+    let models = parse_string_array(&payload["models"]);
+
+    let mut providers = state.providers.write().await;
+    if providers.iter().any(|p| p.name == name) {
+        return conflict(&format!("Provider '{name}' already exists"));
     }
-    let target = state.upstream_target.read().await.clone();
-    let name = state.active_upstream.read().await.clone();
-    Json(serde_json::json!({"ok": true, "targetUrl": target, "name": name}))
+    providers.push(Provider { name, url, token, models });
+    drop(providers);
+
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
-// ── Multi-upstream CRUD ──
+async fn update_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response<Body> {
+    let new_url = match payload["url"].as_str().filter(|s| !s.is_empty()) {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => return bad_request("URL is required"),
+    };
+
+    let mut providers = state.providers.write().await;
+    let p = match providers.iter_mut().find(|p| p.name == name) {
+        Some(p) => p,
+        None => return not_found(&format!("Provider '{name}' not found")),
+    };
+    p.url = new_url;
+    // Only update token if provided; empty string clears it
+    if let Some(tok) = payload.get("token") {
+        p.token = tok.as_str().filter(|s| !s.is_empty()).map(String::from);
+    }
+    if let Some(mods) = payload.get("models") {
+        p.models = parse_string_array(mods);
+    }
+    drop(providers);
+
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+async fn delete_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response<Body> {
+    let mut providers = state.providers.write().await;
+    let idx = match providers.iter().position(|p| p.name == name) {
+        Some(i) => i,
+        None => return not_found(&format!("Provider '{name}' not found")),
+    };
+    providers.remove(idx);
+    drop(providers);
+
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+// ── Upstreams CRUD ──
 
 async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
+        "active_upstream": *state.active_upstream.read().await,
         "upstreams": state.upstream_info_list().await,
-        "activeUrl": state.upstream_target.read().await.clone(),
+        "providers": state.provider_info_list().await,
     }))
 }
 
@@ -253,33 +297,20 @@ async fn add_upstream(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response<Body> {
-    let name = match payload["name"].as_str() {
-        Some(n) if !n.is_empty() => n.to_string(),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Name is required"}))).into_response(),
+    let name = match payload["name"].as_str().filter(|s| !s.is_empty()) {
+        Some(n) => n.to_string(),
+        None => return bad_request("Name is required"),
     };
-    let url = match payload["url"].as_str() {
-        Some(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "URL is required"}))).into_response(),
-    };
-    let token = payload["token"].as_str().filter(|t| !t.is_empty()).map(|t| t.to_string());
-    let model_map: HashMap<String, String> = payload["model_map"]
-        .as_object()
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
 
     let mut upstreams = state.upstreams.write().await;
     if upstreams.iter().any(|u| u.name == name) {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("Upstream '{name}' already exists")}))).into_response();
+        return conflict(&format!("Upstream '{name}' already exists"));
     }
-    upstreams.push(UpstreamTarget { name, url, token, model_map });
+    upstreams.push(parse_upstream_config(name, &payload));
     drop(upstreams);
 
-    state.persist_upstreams().await;
-    let msg = upstream_changed_msg(&state).await;
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
     let _ = state.broadcast_send(msg);
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -289,44 +320,16 @@ async fn update_upstream(
     Path(name): Path<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response<Body> {
-    let new_url = match payload["url"].as_str() {
-        Some(u) if !u.is_empty() => u.trim_end_matches('/').to_string(),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "URL is required"}))).into_response(),
-    };
-    let token_update = payload.get("token").map(|v| {
-        v.as_str().filter(|t| !t.is_empty()).map(|t| t.to_string())
-    });
-    let model_map_update: Option<HashMap<String, String>> = payload.get("model_map").map(|v| {
-        v.as_object()
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-
     let mut upstreams = state.upstreams.write().await;
-    let is_active = state.active_upstream.read().await.clone() == name;
-    if let Some(u) = upstreams.iter_mut().find(|u| u.name == name) {
-        u.url = new_url.clone();
-        if let Some(ref tok) = token_update {
-            u.token = tok.clone();
-        }
-        if let Some(ref map) = model_map_update {
-            u.model_map = map.clone();
-        }
-    } else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response();
-    }
+    let idx = match upstreams.iter().position(|u| u.name == name) {
+        Some(i) => i,
+        None => return not_found(&format!("Upstream '{name}' not found")),
+    };
+    upstreams[idx] = parse_upstream_config(name, &payload);
     drop(upstreams);
 
-    if is_active {
-        *state.upstream_target.write().await = new_url;
-    }
-
-    state.persist_upstreams().await;
-    let msg = upstream_changed_msg(&state).await;
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
     let _ = state.broadcast_send(msg);
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -337,25 +340,23 @@ async fn delete_upstream(
 ) -> Response<Body> {
     let mut upstreams = state.upstreams.write().await;
     if upstreams.len() <= 1 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Cannot delete the only upstream"}))).into_response();
+        return bad_request("Cannot delete the only upstream");
     }
-
     let idx = match upstreams.iter().position(|u| u.name == name) {
         Some(i) => i,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response(),
+        None => return not_found(&format!("Upstream '{name}' not found")),
     };
     let was_active = upstreams[idx].name == *state.active_upstream.read().await;
     upstreams.remove(idx);
-
-    if was_active {
-        let new_active = upstreams[0].clone();
-        *state.active_upstream.write().await = new_active.name.clone();
-        *state.upstream_target.write().await = new_active.url;
-    }
+    let first_name = upstreams[0].name.clone();
     drop(upstreams);
 
-    state.persist_upstreams().await;
-    let msg = upstream_changed_msg(&state).await;
+    if was_active {
+        *state.active_upstream.write().await = first_name;
+    }
+
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
     let _ = state.broadcast_send(msg);
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -364,21 +365,16 @@ async fn activate_upstream(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Response<Body> {
-    let upstreams = state.upstreams.read().await;
-    let target = match upstreams.iter().find(|u| u.name == name) {
-        Some(u) => u.clone(),
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("Upstream '{name}' not found")}))).into_response(),
-    };
-    drop(upstreams);
+    let exists = state.upstreams.read().await.iter().any(|u| u.name == name);
+    if !exists {
+        return not_found(&format!("Upstream '{name}' not found"));
+    }
+    *state.active_upstream.write().await = name.clone();
 
-    let url = target.url;
-    *state.active_upstream.write().await = name;
-    *state.upstream_target.write().await = url.clone();
-
-    state.persist_upstreams().await;
-    let msg = upstream_changed_msg(&state).await;
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
     let _ = state.broadcast_send(msg);
-    Json(serde_json::json!({"ok": true, "activeUrl": url})).into_response()
+    Json(serde_json::json!({"ok": true, "active": name})).into_response()
 }
 
 // ── Health ──
@@ -421,16 +417,9 @@ async fn get_session(
                 .iter()
                 .filter_map(|rid| state.db.get_request(rid).ok().flatten())
                 .collect();
-            Json(serde_json::json!({
-                "session": session,
-                "requests": requests
-            }))
-            .into_response()
+            Json(serde_json::json!({"session": session, "requests": requests})).into_response()
         }
-        _ => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
-                .into_response()
-        }
+        _ => not_found("Session not found"),
     }
 }
 
@@ -448,19 +437,13 @@ async fn rename_session(
         Ok(true) => {
             if let Ok(Some(session)) = state.db.get_session(&id) {
                 let _ = state.broadcast_send(WsMessage::SessionUpdated {
-                    request_id: session.id.clone(),
+                    request_id: session.id,
                 });
             }
             Json(serde_json::json!({"ok": true})).into_response()
         }
-        Ok(false) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
-                .into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-                .into_response()
-        }
+        Ok(false) => not_found("Session not found"),
+        Err(e) => internal_error(&e.to_string()),
     }
 }
 
@@ -470,14 +453,8 @@ async fn delete_session(
 ) -> impl IntoResponse {
     match state.db.delete_session(&id) {
         Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
-        Ok(false) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
-                .into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-                .into_response()
-        }
+        Ok(false) => not_found("Session not found"),
+        Err(e) => internal_error(&e.to_string()),
     }
 }
 
@@ -493,50 +470,36 @@ async fn export_session(
 ) -> impl IntoResponse {
     let session = match state.db.get_session(&id) {
         Ok(Some(s)) => s,
-        _ => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Session not found"})))
-                .into_response();
-        }
+        _ => return not_found("Session not found"),
     };
-
     let requests: Vec<_> = session
         .request_ids
         .iter()
         .filter_map(|rid| state.db.get_request(rid).ok().flatten())
         .collect();
-
     let format = query.format.as_deref().unwrap_or("json");
-
     match format {
         "json" => {
-            let exported = export_json(&session, &requests);
+            let data = export_json(&session, &requests);
             (
                 StatusCode::OK,
                 [
                     ("content-type", "application/json"),
-                    (
-                        "content-disposition",
-                        &format!("attachment; filename=\"session_{}.json\"", session.id),
-                    ),
+                    ("content-disposition", &format!("attachment; filename=\"session_{}.json\"", session.id)),
                 ],
-                Json(exported),
-            )
-                .into_response()
+                Json(data),
+            ).into_response()
         }
         "har" => {
-            let har = export_har(&session, &requests);
+            let data = export_har(&session, &requests);
             (
                 StatusCode::OK,
                 [
                     ("content-type", "application/json"),
-                    (
-                        "content-disposition",
-                        &format!("attachment; filename=\"session_{}.har\"", session.id),
-                    ),
+                    ("content-disposition", &format!("attachment; filename=\"session_{}.har\"", session.id)),
                 ],
-                Json(har),
-            )
-                .into_response()
+                Json(data),
+            ).into_response()
         }
         "markdown" | "md" => {
             let md = export_markdown(&session, &requests);
@@ -544,20 +507,12 @@ async fn export_session(
                 StatusCode::OK,
                 [
                     ("content-type", "text/markdown; charset=utf-8"),
-                    (
-                        "content-disposition",
-                        &format!("attachment; filename=\"session_{}.md\"", session.id),
-                    ),
+                    ("content-disposition", &format!("attachment; filename=\"session_{}.md\"", session.id)),
                 ],
                 md,
-            )
-                .into_response()
+            ).into_response()
         }
-        _ => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Unsupported format. Use: json, har, markdown"})),
-        )
-            .into_response(),
+        _ => bad_request("Unsupported format. Use: json, har, markdown"),
     }
 }
 
@@ -595,10 +550,7 @@ async fn get_request(
 ) -> impl IntoResponse {
     match state.db.get_request(&id) {
         Ok(Some(req)) => Json(serde_json::json!(req)).into_response(),
-        _ => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Request not found"})))
-                .into_response()
-        }
+        _ => not_found("Request not found"),
     }
 }
 
@@ -608,14 +560,8 @@ async fn delete_single_request(
 ) -> impl IntoResponse {
     match state.db.delete_request(&id) {
         Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
-        Ok(false) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Request not found"})))
-                .into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-                .into_response()
-        }
+        Ok(false) => not_found("Request not found"),
+        Err(e) => internal_error(&e.to_string()),
     }
 }
 
@@ -630,14 +576,11 @@ async fn delete_requests_batch(
 ) -> impl IntoResponse {
     match state.db.delete_requests(&payload.ids) {
         Ok(n) => Json(serde_json::json!({"ok": true, "deleted": n})).into_response(),
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-                .into_response()
-        }
+        Err(e) => internal_error(&e.to_string()),
     }
 }
 
-// ── Tee writer (packet capture) ──
+// ── Capture ──
 
 #[derive(Deserialize)]
 struct CaptureToggle {
@@ -652,13 +595,61 @@ async fn toggle_capture(
     if payload.enabled {
         let _ = state.tee_writer.start_new_file().await;
     }
-    let _ = state.broadcast_send(WsMessage::TeeStatusChanged {
-        enabled: payload.enabled,
-    });
+    let _ = state.broadcast_send(WsMessage::TeeStatusChanged { enabled: payload.enabled });
     Json(serde_json::json!({"ok": true, "enabled": payload.enabled}))
 }
 
 async fn capture_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.tee_writer.is_enabled();
-    Json(serde_json::json!({"enabled": enabled}))
+    Json(serde_json::json!({"enabled": state.tee_writer.is_enabled()}))
+}
+
+// ── Helpers ──
+
+fn parse_string_array(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+fn parse_tier_rule(v: &serde_json::Value) -> Option<TierRule> {
+    if v.is_null() {
+        return None;
+    }
+    let provider = v["provider"].as_str().unwrap_or("").to_string();
+    let model = v["model"].as_str().unwrap_or("").to_string();
+    if provider.is_empty() && model.is_empty() {
+        return None;
+    }
+    Some(TierRule {
+        keywords: parse_string_array(&v["keywords"]),
+        provider,
+        model,
+    })
+}
+
+fn parse_upstream_config(name: String, payload: &serde_json::Value) -> UpstreamConfig {
+    UpstreamConfig {
+        name,
+        high: parse_tier_rule(&payload["high"]),
+        mid: parse_tier_rule(&payload["mid"]),
+        low: parse_tier_rule(&payload["low"]),
+        default_provider: payload["default_provider"].as_str().unwrap_or("").to_string(),
+        default_model: payload["default_model"].as_str().unwrap_or("").to_string(),
+    }
+}
+
+fn bad_request(msg: &str) -> Response<Body> {
+    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+fn conflict(msg: &str) -> Response<Body> {
+    (StatusCode::CONFLICT, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+fn not_found(msg: &str) -> Response<Body> {
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+fn internal_error(msg: &str) -> Response<Body> {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response()
 }

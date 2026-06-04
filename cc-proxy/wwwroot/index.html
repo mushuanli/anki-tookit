@@ -14,6 +14,7 @@
             <a href="#" data-view="conversation">Conversation</a>
             <a href="#" data-view="mcp">MCP Observer</a>
             <a href="#" data-view="hooks">Hooks</a>
+            <a href="#" data-view="settings">Settings</a>
         </nav>
         <div class="status-bar">
             <span id="connection-status" class="disconnected">Disconnected</span>
@@ -23,7 +24,7 @@
     </header>
 
     <main>
-        <!-- Inspector View -->
+        <!-- ── Inspector View ── -->
         <section id="view-inspector" class="view active">
             <div class="toolbar">
                 <button id="btn-toggle-capture">Dump Raw</button>
@@ -31,28 +32,13 @@
                 <span class="sep">|</span>
                 <label>Upstream:</label>
                 <select id="upstream-select"></select>
-                <button id="btn-upstream-add" title="Add">+</button>
-                <button id="btn-upstream-edit" title="Edit">&#9998;</button>
-                <button id="btn-upstream-delete" title="Delete" disabled>&#10005;</button>
-                <span id="upstream-url-display" class="upstream-url"></span>
-            </div>
-            <div id="upstream-edit-form" class="inline-edit hidden">
-                <input type="text" id="upstream-edit-name" placeholder="Name" size="12">
-                <input type="text" id="upstream-edit-url" placeholder="https://..." size="36">
-                <input type="password" id="upstream-edit-token" placeholder="Token (optional)" size="22">
-                <br>
-                <label class="model-map-label">Model Map:</label>
-                <textarea id="upstream-edit-modelmap" placeholder="claude-sonnet-4-6 = deepseek-v4-pro&#10;claude-opus-4-6 = deepseek-v4-pro[1m]&#10;claude-haiku-4-5 = deepseek-chat" rows="3" cols="52" spellcheck="false"></textarea>
-                <br>
-                <button id="btn-upstream-save">Save</button>
-                <button id="btn-upstream-cancel">Cancel</button>
             </div>
             <div class="toolbar filter-row">
                 <label>Session:</label>
                 <select id="filter-session">
                     <option value="">All Sessions</option>
                 </select>
-                <button id="btn-session-export" class="hidden">Export ▾</button>
+                <button id="btn-session-export" class="hidden">Export</button>
                 <button id="btn-session-rename" class="hidden">Rename</button>
                 <button id="btn-session-delete" class="hidden btn-danger">Delete Session</button>
                 <span class="sep">|</span>
@@ -76,8 +62,8 @@
                             <th>Status</th>
                             <th>Model</th>
                             <th>Session</th>
-                            <th>Tokens In</th>
-                            <th>Tokens Out</th>
+                            <th>In</th>
+                            <th>Out</th>
                             <th>Duration</th>
                             <th>TTFT</th>
                             <th></th>
@@ -101,7 +87,10 @@
             <div id="request-detail" class="detail-panel hidden">
                 <div class="detail-header">
                     <h3 id="detail-title">Request Detail</h3>
-                    <button id="btn-close-detail">×</button>
+                    <div>
+                        <button id="btn-fullscreen-detail" title="Fullscreen">⛶</button>
+                        <button id="btn-close-detail">×</button>
+                    </div>
                 </div>
                 <div class="detail-tabs">
                     <button class="tab active" data-tab="request">Request</button>
@@ -112,23 +101,23 @@
             </div>
         </section>
 
-        <!-- Conversation View -->
+        <!-- ── Conversation View ── -->
         <section id="view-conversation" class="view">
             <div class="toolbar">
-                <button id="btn-conv-clear">Clear</button>
                 <select id="conv-filter">
-                    <option value="all">All Messages</option>
+                    <option value="">All</option>
                 </select>
+                <button id="btn-fullscreen-conv" title="Fullscreen">⛶</button>
             </div>
             <div id="conversation-timeline" class="timeline"></div>
         </section>
 
-        <!-- MCP Observer View -->
+        <!-- ── MCP Observer View ── -->
         <section id="view-mcp" class="view">
             <div class="toolbar">
                 <label>MCP Destination:</label>
                 <input type="text" id="mcp-destination" placeholder="e.g. https://gitmcp.io/user/repo" size="50">
-                <button id="btn-set-mcp">Set Destination</button>
+                <button id="btn-set-mcp">Set</button>
                 <button id="btn-clear-mcp-view">Clear</button>
             </div>
             <div class="table-container">
@@ -147,7 +136,7 @@
             </div>
         </section>
 
-        <!-- Hooks View -->
+        <!-- ── Hooks View ── -->
         <section id="view-hooks" class="view">
             <div class="toolbar">
                 <button id="btn-clear-hooks">Clear Hooks</button>
@@ -167,7 +156,142 @@
                 </table>
             </div>
         </section>
+
+        <!-- ── Settings View ── -->
+        <section id="view-settings" class="view">
+            <div class="settings-layout">
+
+                <!-- Providers panel -->
+                <div class="settings-panel">
+                    <div class="settings-panel-header">
+                        <h2>Providers</h2>
+                        <button id="btn-provider-add">+ Add</button>
+                    </div>
+                    <div id="provider-list" class="item-list"></div>
+
+                    <!-- Provider edit form -->
+                    <div id="provider-edit" class="settings-form hidden">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="pe-name" placeholder="deepseek">
+                        </div>
+                        <div class="form-group">
+                            <label>URL</label>
+                            <input type="text" id="pe-url" placeholder="https://api.deepseek.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Token</label>
+                            <input type="password" id="pe-token" placeholder="sk-... (leave empty to keep)">
+                        </div>
+                        <div class="form-group form-group-col">
+                            <label>Models</label>
+                            <div id="pe-models-list" class="model-tag-list"></div>
+                            <div class="model-add-row">
+                                <input type="text" id="pe-model-input" placeholder="Add model ID...">
+                                <button id="pe-model-add-btn">+</button>
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button id="btn-provider-save" class="btn-primary">Save</button>
+                            <button id="btn-provider-cancel">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Upstreams panel -->
+                <div class="settings-panel">
+                    <div class="settings-panel-header">
+                        <h2>Upstreams</h2>
+                        <button id="btn-upstream-add">+ Add</button>
+                    </div>
+                    <div id="upstream-list" class="item-list"></div>
+
+                    <!-- Upstream edit form -->
+                    <div id="upstream-edit" class="settings-form hidden">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" id="ue-name" placeholder="production">
+                        </div>
+
+                        <div class="tier-section">
+                            <span class="tier-badge tier-high">High</span>
+                            <span class="tier-desc">e.g. claude-opus, matched first</span>
+                            <div class="tier-row">
+                                <label>Keywords</label>
+                                <input type="text" id="ue-high-kw" placeholder="opus (comma-separated)">
+                            </div>
+                            <div class="tier-row">
+                                <label>Provider</label>
+                                <select id="ue-high-provider"><option value="">— none —</option></select>
+                                <label>Model</label>
+                                <input type="text" id="ue-high-model" placeholder="model-id" list="dl-high">
+                                <datalist id="dl-high"></datalist>
+                            </div>
+                        </div>
+
+                        <div class="tier-section">
+                            <span class="tier-badge tier-mid">Mid</span>
+                            <span class="tier-desc">e.g. claude-sonnet</span>
+                            <div class="tier-row">
+                                <label>Keywords</label>
+                                <input type="text" id="ue-mid-kw" placeholder="sonnet">
+                            </div>
+                            <div class="tier-row">
+                                <label>Provider</label>
+                                <select id="ue-mid-provider"><option value="">— none —</option></select>
+                                <label>Model</label>
+                                <input type="text" id="ue-mid-model" placeholder="model-id" list="dl-mid">
+                                <datalist id="dl-mid"></datalist>
+                            </div>
+                        </div>
+
+                        <div class="tier-section">
+                            <span class="tier-badge tier-low">Low</span>
+                            <span class="tier-desc">e.g. claude-haiku, matched last</span>
+                            <div class="tier-row">
+                                <label>Keywords</label>
+                                <input type="text" id="ue-low-kw" placeholder="haiku">
+                            </div>
+                            <div class="tier-row">
+                                <label>Provider</label>
+                                <select id="ue-low-provider"><option value="">— none —</option></select>
+                                <label>Model</label>
+                                <input type="text" id="ue-low-model" placeholder="model-id" list="dl-low">
+                                <datalist id="dl-low"></datalist>
+                            </div>
+                        </div>
+
+                        <div class="tier-section">
+                            <span class="tier-badge tier-default">Default</span>
+                            <span class="tier-desc">Fallback when no keyword matches</span>
+                            <div class="tier-row">
+                                <label>Provider</label>
+                                <select id="ue-default-provider"><option value="">— none —</option></select>
+                                <label>Model</label>
+                                <input type="text" id="ue-default-model" placeholder="model-id" list="dl-default">
+                                <datalist id="dl-default"></datalist>
+                            </div>
+                        </div>
+
+                        <div class="form-actions">
+                            <button id="btn-upstream-save" class="btn-primary">Save</button>
+                            <button id="btn-upstream-cancel">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </section>
     </main>
+
+    <!-- ── Fullscreen overlay ── -->
+    <div id="fullscreen-overlay" class="fullscreen-overlay hidden">
+        <div class="fullscreen-header">
+            <span id="fullscreen-title"></span>
+            <button id="btn-fullscreen-close" class="fullscreen-close">&#10005;</button>
+        </div>
+        <div id="fullscreen-content" class="fullscreen-content"></div>
+    </div>
 
     <script src="js/app.js"></script>
 </body>

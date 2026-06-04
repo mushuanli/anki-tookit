@@ -5,7 +5,10 @@ pub mod models;
 pub mod sse;
 pub mod store;
 
-pub use config::{AppConfig, UpstreamTarget};
+pub use config::{AppConfig, Provider, TierRule, UpstreamConfig};
 pub use db::Database;
-pub use models::{translate_model, HookEvent, McpRequest, Session, SessionStatus, SseEvent, UpstreamInfo, WsMessage};
+pub use models::{
+    HookEvent, McpRequest, ProviderInfo, Session, SessionStatus, SseEvent,
+    TierRuleInfo, UpstreamInfo, WsMessage,
+};
 pub use store::RingBuffer;

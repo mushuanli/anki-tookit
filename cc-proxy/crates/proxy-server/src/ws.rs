@@ -1,12 +1,22 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
+
 use futures::{SinkExt, StreamExt};
 use proxy_core::models::WsMessage;
+use tokio::time::interval;
 
 use crate::AppState;
+
+/// How often to send a WebSocket Ping frame to keep the connection alive.
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Close the connection if no Pong has been received within this window.
+const DEAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -18,57 +28,56 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Send history on connect
-    let requests = state.db.list_requests(None, None, None, None, Some(500)).unwrap_or_default();
-    let history_json = serde_json::to_string(&WsMessage::History { requests }).ok();
-    if let Some(json) = history_json {
-        let _ = sender.send(Message::Text(json.into())).await;
-    }
+    // ── Send lightweight state snapshot on connect ──
+    // NOTE: request history is intentionally NOT sent here.
+    //       The client fetches it via GET /api/requests (REST) immediately after
+    //       connecting, which avoids sending potentially large payloads over the
+    //       WebSocket and causing the connection to time out before the ping loop starts.
 
     let hooks = state.db.list_hooks().unwrap_or_default();
-    let hook_history = serde_json::to_string(&WsMessage::HookHistory { events: hooks }).ok();
-    if let Some(json) = hook_history {
-        let _ = sender.send(Message::Text(json.into())).await;
-    }
+    send_json(&mut sender, &WsMessage::HookHistory { events: hooks }).await;
 
     let mcp = state.db.list_mcp().unwrap_or_default();
-    let mcp_history = serde_json::to_string(&WsMessage::McpHistory { requests: mcp }).ok();
-    if let Some(json) = mcp_history {
-        let _ = sender.send(Message::Text(json.into())).await;
-    }
+    send_json(&mut sender, &WsMessage::McpHistory { requests: mcp }).await;
 
     let dest = state.mcp_destination.read().await.clone();
-    let mcp_config = serde_json::to_string(&WsMessage::McpConfigChanged {
-        destination_url: dest,
-    })
-    .ok();
-    if let Some(json) = mcp_config {
-        let _ = sender.send(Message::Text(json.into())).await;
-    }
+    send_json(&mut sender, &WsMessage::McpConfigChanged { destination_url: dest }).await;
 
-    let upstream_msg = serde_json::to_string(&WsMessage::UpstreamChanged {
-        active_url: state.upstream_target.read().await.clone(),
-        upstreams: state.upstream_info_list().await,
-    })
-    .ok();
-    if let Some(json) = upstream_msg {
-        let _ = sender.send(Message::Text(json.into())).await;
-    }
+    send_json(&mut sender, &state.upstream_changed_msg().await).await;
 
-    // Send current capture status
-    let tee_status = serde_json::to_string(&WsMessage::TeeStatusChanged {
-        enabled: state.tee_writer.is_enabled(),
-    })
-    .ok();
-    if let Some(json) = tee_status {
-        let _ = sender.send(Message::Text(json.into())).await;
-    }
+    send_json(
+        &mut sender,
+        &WsMessage::TeeStatusChanged { enabled: state.tee_writer.is_enabled() },
+    )
+    .await;
 
-    // Subscribe to broadcast
+    // ── Main loop ──
     let mut broadcast_rx = state.broadcast_subscribe();
+    let mut ping_ticker = interval(PING_INTERVAL);
+    ping_ticker.tick().await; // skip the immediate first tick
+
+    // Timestamp of the last pong (or connection start).
+    let mut last_pong = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
+            // ── Heartbeat ping ──
+            _ = ping_ticker.tick() => {
+                // Disconnect only if silent for longer than DEAD_TIMEOUT.
+                if last_pong.elapsed() > DEAD_TIMEOUT {
+                    tracing::debug!(
+                        "WebSocket dead — no pong for {}s, closing",
+                        last_pong.elapsed().as_secs()
+                    );
+                    break;
+                }
+                tracing::trace!("WebSocket ping →");
+                if sender.send(Message::Ping(vec![])).await.is_err() {
+                    break;
+                }
+            }
+
+            // ── Broadcast messages from the rest of the server ──
             msg = broadcast_rx.recv() => {
                 match msg {
                     Ok(ws_msg) => {
@@ -84,13 +93,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     Err(_) => break,
                 }
             }
+
+            // ── Incoming frames from the client ──
             msg = receiver.next() => {
                 match msg {
+                    Some(Ok(Message::Pong(_))) => {
+                        tracing::trace!("WebSocket ← pong");
+                        last_pong = tokio::time::Instant::now();
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        // Browser-initiated ping — respond immediately
+                        let _ = sender.send(Message::Pong(data.to_vec())).await;
+                    }
                     Some(Ok(Message::Text(text))) => {
                         let _ = handle_client_message(&state, &text).await;
                     }
-                    Some(Ok(Message::Close(_))) => break,
-                    None => break,
+                    Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
                 }
             }
@@ -98,9 +116,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
+async fn send_json<T: serde::Serialize>(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    msg: &T,
+) {
+    if let Ok(json) = serde_json::to_string(msg) {
+        let _ = sender.send(Message::Text(json.into())).await;
+    }
+}
+
 async fn handle_client_message(_state: &AppState, text: &str) -> Result<(), String> {
     let _cmd: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("Invalid JSON: {}", e))?;
-    // Client commands are no longer needed — all operations go through REST API
     Ok(())
 }

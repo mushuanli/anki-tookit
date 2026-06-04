@@ -48,7 +48,7 @@ pub struct ProxiedRequest {
     pub cache_read_input_tokens: Option<u32>,
     // Streaming
     pub sse_events: Vec<SseEvent>,
-    pub content_text: Option<String>, // merged content_block_delta text, for display
+    pub content_text: Option<String>,
     // Timing
     pub duration_ms: Option<u64>,
     pub time_to_first_token_ms: Option<u64>,
@@ -65,26 +65,7 @@ impl ProxiedRequest {
             timestamp: Utc::now(),
             method: method.to_string(),
             path: path.to_string(),
-            request_headers: HashMap::new(),
-            request_body: None,
-            model: None,
-            is_streaming: false,
-            max_tokens: None,
-            status_code: None,
-            response_headers: HashMap::new(),
-            response_body: None,
-            message_id: None,
-            stop_reason: None,
-            input_tokens: None,
-            output_tokens: None,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            sse_events: Vec::new(),
-            content_text: None,
-            duration_ms: None,
-            time_to_first_token_ms: None,
-            session_id: None,
-            error: None,
+            ..Default::default()
         }
     }
 }
@@ -138,7 +119,7 @@ pub struct McpRequest {
     pub id: Option<serde_json::Value>,
 }
 
-// ── Session model for request recording + export ──
+// ── Session model ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionStatus {
@@ -177,174 +158,37 @@ impl Session {
     }
 }
 
-// ── Model name translation ──
+// ── Provider info (for frontend) ──
 
-/// Translate a Claude model name to the upstream's equivalent using a model map.
-///
-/// Matching strategy (in order):
-/// 1. Exact match on the full model name
-/// 2. Strip `[1m]` suffix → exact match on the base name
-/// 3. Longest prefix match (handles dated versions like `claude-sonnet-4-6-20250514`)
-/// 4. If input had `[1m]` and the target doesn't, append `[1m]` to the result
-/// 5. Fallback: return the original model name unchanged
-pub fn translate_model(model: &str, model_map: &HashMap<String, String>) -> String {
-    if model_map.is_empty() {
-        return model.to_string();
-    }
-
-    // 1. Exact match
-    if let Some(mapped) = model_map.get(model) {
-        return mapped.clone();
-    }
-
-    // 2. Strip [1m] suffix and try exact match
-    let has_1m = model.ends_with("[1m]");
-    let base = if has_1m {
-        model.strip_suffix("[1m]").unwrap()
-    } else {
-        model
-    };
-
-    if let Some(mapped) = model_map.get(base) {
-        if has_1m && !mapped.ends_with("[1m]") {
-            return format!("{}[1m]", mapped);
-        }
-        return mapped.clone();
-    }
-
-    // 3. Longest prefix match (for dated versions)
-    let mut best: Option<(&String, &String)> = None;
-    for (pattern, target) in model_map {
-        if base.starts_with(pattern.as_str()) {
-            match best {
-                Some((ref p, _)) if pattern.len() <= p.len() => {}
-                _ => best = Some((pattern, target)),
-            }
-        }
-    }
-
-    if let Some((_, target)) = best {
-        if has_1m && !target.ends_with("[1m]") {
-            return format!("{}[1m]", target);
-        }
-        return target.clone();
-    }
-
-    // 4. No match — return original
-    model.to_string()
-}
-
-#[cfg(test)]
-mod translate_tests {
-    use super::*;
-
-    fn sample_map() -> HashMap<String, String> {
-        HashMap::from([
-            ("claude-sonnet-4-6".into(), "deepseek-v4-pro".into()),
-            ("claude-opus-4-6".into(), "deepseek-v4-pro[1m]".into()),
-            ("claude-haiku-4-5".into(), "deepseek-chat".into()),
-        ])
-    }
-
-    #[test]
-    fn exact_match() {
-        let map = sample_map();
-        assert_eq!(translate_model("claude-sonnet-4-6", &map), "deepseek-v4-pro");
-    }
-
-    #[test]
-    fn prefix_match_dated_version() {
-        let map = sample_map();
-        assert_eq!(
-            translate_model("claude-sonnet-4-6-20250514", &map),
-            "deepseek-v4-pro"
-        );
-    }
-
-    #[test]
-    fn prefix_match_dated_opus() {
-        let map = sample_map();
-        assert_eq!(
-            translate_model("claude-opus-4-6-20250514", &map),
-            "deepseek-v4-pro[1m]"
-        );
-    }
-
-    #[test]
-    fn exact_match_with_1m() {
-        let map = sample_map();
-        assert_eq!(
-            translate_model("claude-sonnet-4-6[1m]", &map),
-            "deepseek-v4-pro[1m]"
-        );
-    }
-
-    #[test]
-    fn prefix_match_dated_with_1m() {
-        let map = sample_map();
-        assert_eq!(
-            translate_model("claude-sonnet-4-6-20250514[1m]", &map),
-            "deepseek-v4-pro[1m]"
-        );
-    }
-
-    #[test]
-    fn haiku_exact() {
-        let map = sample_map();
-        assert_eq!(
-            translate_model("claude-haiku-4-5-20251001", &map),
-            "deepseek-chat"
-        );
-    }
-
-    #[test]
-    fn no_match_returns_original() {
-        let map = sample_map();
-        assert_eq!(
-            translate_model("gpt-4-turbo", &map),
-            "gpt-4-turbo"
-        );
-    }
-
-    #[test]
-    fn empty_map_returns_original() {
-        let map = HashMap::new();
-        assert_eq!(
-            translate_model("claude-sonnet-4-6", &map),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    #[test]
-    fn opus_dated_with_1m_target_already_has_1m() {
-        // Input has [1m], target already has [1m] → no double append
-        let map = sample_map();
-        assert_eq!(
-            translate_model("claude-opus-4-6-20250514[1m]", &map),
-            "deepseek-v4-pro[1m]"
-        );
-    }
-
-    #[test]
-    fn longest_prefix_wins_over_short() {
-        let mut map = sample_map();
-        map.insert("claude-sonnet".into(), "wrong-model".into());
-        assert_eq!(
-            translate_model("claude-sonnet-4-6-20250514", &map),
-            "deepseek-v4-pro"
-        );
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub url: String,
+    pub has_token: bool,
+    pub models: Vec<String>,
 }
 
 // ── Upstream info (for frontend) ──
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TierRuleInfo {
+    pub keywords: Vec<String>,
+    pub provider: String,
+    pub model: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamInfo {
     pub name: String,
-    pub url: String,
     pub active: bool,
-    pub has_token: bool,
-    pub model_map: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high: Option<TierRuleInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mid: Option<TierRuleInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub low: Option<TierRuleInfo>,
+    pub default_provider: String,
+    pub default_model: String,
 }
 
 // ── WebSocket message envelope ──
@@ -361,8 +205,9 @@ pub enum WsMessage {
     McpCleared,
     McpConfigChanged { destination_url: Option<String> },
     UpstreamChanged {
-        active_url: String,
+        active_upstream: String,
         upstreams: Vec<UpstreamInfo>,
+        providers: Vec<ProviderInfo>,
     },
     History { requests: Vec<ProxiedRequest> },
     HookHistory { events: Vec<HookEvent> },

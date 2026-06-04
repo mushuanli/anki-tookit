@@ -16,24 +16,17 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::AppState;
 
-// ── Header helpers ──
+// ── Header constants ──
 
 const REDACTED_HEADERS: &[&str] = &["x-api-key", "authorization"];
+const DROP_HEADERS: &[&str] = &["transfer-encoding", "content-encoding", "content-length"];
 
-/// Headers dropped from capture output (noisy / uninformative for humans).
-const DROP_HEADERS: &[&str] = &[
-    "transfer-encoding",
-    "content-encoding",
-    "content-length",
-];
+// ── Header helpers ──
 
 fn redact_headers(headers: &HeaderMap) -> HashMap<String, String> {
     headers
         .iter()
-        .filter(|(k, _)| {
-            let key = k.as_str().to_lowercase();
-            !DROP_HEADERS.contains(&key.as_str())
-        })
+        .filter(|(k, _)| !DROP_HEADERS.contains(&k.as_str().to_lowercase().as_str()))
         .map(|(k, v)| {
             let key = k.as_str().to_lowercase();
             let value = if REDACTED_HEADERS.contains(&key.as_str()) {
@@ -46,25 +39,17 @@ fn redact_headers(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
-fn forward_headers(headers: &HeaderMap) -> HeaderMap {
-    build_upstream_headers(headers, None)
-}
-
 fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> HeaderMap {
     let mut fwd = HeaderMap::new();
-
     for (k, v) in headers.iter() {
         let key = k.as_str().to_lowercase();
-        if key == "host"
-            || key == "connection"
-            || key == "transfer-encoding"
-            || key == "accept-encoding"
-            || key == "proxy-connection"
-            || key == "proxy-authorization"
-        {
+        if matches!(
+            key.as_str(),
+            "host" | "connection" | "transfer-encoding" | "accept-encoding"
+                | "proxy-connection" | "proxy-authorization"
+        ) {
             continue;
         }
-        // If we have an override token, skip client's auth headers
         if override_token.is_some() && (key == "authorization" || key == "x-api-key") {
             continue;
         }
@@ -72,7 +57,6 @@ fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> 
     }
     fwd.insert("accept-encoding", HeaderValue::from_static("identity"));
 
-    // Inject upstream token
     if let Some(token) = override_token {
         if token.starts_with("sk-") {
             fwd.insert(
@@ -80,20 +64,14 @@ fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>) -> 
                 HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
             );
         } else {
-            fwd.insert(
-                "x-api-key",
-                HeaderValue::from_str(token).unwrap(),
-            );
+            fwd.insert("x-api-key", HeaderValue::from_str(token).unwrap());
         }
     }
-
     fwd
 }
 
 // ── Session ID extraction ──
 
-/// Extract session_id from request body metadata.user_id JSON.
-/// Format: {"metadata": {"user_id": "{\"session_id\":\"...\"}"}}
 fn extract_session_id(body_json: &serde_json::Value) -> Option<String> {
     body_json
         .get("metadata")
@@ -111,30 +89,90 @@ fn extract_session_id(body_json: &serde_json::Value) -> Option<String> {
 
 // ── Model translation helper ──
 
-/// If `model_map` contains a matching entry, replace the `model` field in the
-/// request body JSON and update `captured` fields accordingly.
-/// Returns the (possibly modified) body bytes.
-fn apply_model_translation(
-    model_map: &std::collections::HashMap<String, String>,
+/// Resolve the upstream provider+model for the active upstream config.
+/// Returns (base_url, token, translated_model).
+/// Returns None if no provider is configured.
+async fn resolve_routing(
+    state: &AppState,
+    request_model: Option<&str>,
+) -> Option<(String, Option<String>, String)> {
+    let active_name = state.active_upstream.read().await.clone();
+    let upstreams = state.upstreams.read().await;
+    let providers = state.providers.read().await;
+
+    let upstream = upstreams.iter().find(|u| u.name == active_name)?;
+
+    let (provider_name, target_model) = match request_model {
+        Some(m) => upstream.resolve(m),
+        None => (upstream.default_provider.clone(), upstream.default_model.clone()),
+    };
+
+    if provider_name.is_empty() {
+        return None;
+    }
+
+    let provider = providers.iter().find(|p| p.name == provider_name)?;
+    Some((
+        provider.url.trim_end_matches('/').to_string(),
+        provider.token.clone(),
+        target_model,
+    ))
+}
+
+/// Rewrite the `model` field in the JSON body if the target model differs.
+/// Updates `captured` fields accordingly.
+fn translate_model_in_body(
     captured: &mut ProxiedRequest,
     body_bytes: Bytes,
+    target_model: &str,
 ) -> Bytes {
-    if model_map.is_empty() {
+    let current = match captured.model.as_deref() {
+        Some(m) if m != target_model => m,
+        _ => return body_bytes,
+    };
+    if current == target_model {
         return body_bytes;
     }
-    if let Some(model) = &captured.model {
-        let new_model = proxy_core::translate_model(model, model_map);
-        if &new_model != model {
-            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                json["model"] = serde_json::Value::String(new_model.clone());
-                let new_bytes = Bytes::from(serde_json::to_vec(&json).unwrap_or_default());
-                captured.model = Some(new_model);
-                captured.request_body = Some(pretty_json(&new_bytes));
-                return new_bytes;
-            }
+    if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        json["model"] = serde_json::Value::String(target_model.to_string());
+        if let Ok(new_bytes) = serde_json::to_vec(&json) {
+            captured.model = Some(target_model.to_string());
+            captured.request_body = Some(pretty_json(&new_bytes));
+            return Bytes::from(new_bytes);
         }
     }
     body_bytes
+}
+
+// ── Retry helper ──
+
+async fn execute_with_retry(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    retry_count: u32,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut last_err = None;
+    for attempt in 0..=retry_count {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_millis(200 * 2u64.pow(attempt - 1));
+            tokio::time::sleep(delay).await;
+            tracing::warn!("Retry attempt {}/{} for {}", attempt, retry_count, request.url());
+        }
+        match request.try_clone() {
+            Some(req) => match client.execute(req).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    if e.is_connect() || e.is_timeout() {
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            },
+            None => return client.execute(request).await,
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 // ── Router ──
@@ -145,7 +183,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .with_state(state)
 }
 
-// ── Main handler: dispatches by mode ──
+// ── Main handler ──
 
 async fn proxy_handler(
     State(state): State<Arc<AppState>>,
@@ -155,33 +193,23 @@ async fn proxy_handler(
     let uri = req.uri().clone();
     let headers = req.headers().clone();
 
-    // ── Mode 1: CONNECT tunnel (forward proxy for HTTPS) ──
     if method == Method::CONNECT {
         return handle_connect_tunnel(req).await;
     }
-
-    // ── Mode 2: Absolute URI (forward proxy for HTTP) ──
     if uri.scheme().is_some() {
         return handle_forward_proxy(state, method, uri, headers, req.into_body()).await;
     }
-
-    // ── Mode 3: Reverse proxy (ANTHROPIC_BASE_URL mode) ──
     handle_reverse_proxy(state, method, uri, headers, req.into_body()).await
 }
 
 // ── CONNECT tunnel ──
 
 async fn handle_connect_tunnel(req: axum::extract::Request) -> Response<Body> {
-    // CONNECT URI may be: authority-form "host:port", absolute-form "http://host:port",
-    // or a path "/host:port" from non-conforming clients. Normalize to "host:port".
-    let target = {
-        let s = req.uri().to_string();
-        if let Some(host) = req.uri().host() {
-            let port = req.uri().port_u16().unwrap_or(443);
-            format!("{}:{}", host, port)
-        } else {
-            s.trim_start_matches('/').to_string()
-        }
+    let target = if let Some(host) = req.uri().host() {
+        let port = req.uri().port_u16().unwrap_or(443);
+        format!("{}:{}", host, port)
+    } else {
+        req.uri().to_string().trim_start_matches('/').to_string()
     };
 
     tracing::debug!("CONNECT tunnel → {}", target);
@@ -189,7 +217,6 @@ async fn handle_connect_tunnel(req: axum::extract::Request) -> Response<Body> {
     let mut remote = match TcpStream::connect(&target).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("CONNECT to {} failed: {}", target, e);
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::from(format!("Cannot connect to {}: {}", target, e)))
@@ -198,30 +225,25 @@ async fn handle_connect_tunnel(req: axum::extract::Request) -> Response<Body> {
     };
 
     let on_upgrade = hyper::upgrade::on(req);
-    // on_upgrade is a future that resolves when the connection is upgraded
-
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(downstream) => {
                 let mut downstream = hyper_util::rt::TokioIo::new(downstream);
-                // TcpStream already implements tokio::io::AsyncRead + AsyncWrite
                 let _ = tokio::io::copy_bidirectional(&mut downstream, &mut remote).await;
-                tracing::debug!("CONNECT tunnel to {} closed", target);
             }
-            Err(e) => {
-                tracing::warn!("CONNECT upgrade error to {}: {}", target, e);
-            }
+            Err(e) => tracing::warn!("CONNECT upgrade error to {}: {}", target, e),
         }
     });
 
-    // 200 OK — tunnel established
     Response::builder()
         .status(StatusCode::OK)
         .body(Body::empty())
         .unwrap()
 }
 
-// ── Forward proxy (absolute URI) ──
+// ── Forward proxy (absolute URI, e.g. HTTPS_PROXY mode) ──
+// The client already determined the destination; we only inject the provider token
+// and translate the model name.
 
 async fn handle_forward_proxy(
     state: Arc<AppState>,
@@ -231,16 +253,12 @@ async fn handle_forward_proxy(
     body: axum::body::Body,
 ) -> Response<Body> {
     let start = Instant::now();
-
-    // Parse the absolute URI
     let scheme = uri.scheme_str().unwrap_or("https");
     let host = uri.host().unwrap_or("unknown");
     let port = uri.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-
     let upstream_url = format!("{}://{}:{}{}", scheme, host, port, path);
 
-    // Collect body
     let body_bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
@@ -251,7 +269,6 @@ async fn handle_forward_proxy(
         }
     };
 
-    // Build captured request
     let mut captured = ProxiedRequest::new(method.as_str(), path);
     captured.request_headers = redact_headers(&headers);
     captured.request_body = Some(pretty_json(&body_bytes));
@@ -266,28 +283,26 @@ async fn handle_forward_proxy(
         }
     }
 
-    // Build upstream request with model translation (forward proxy mode)
-    let active_name = state.active_upstream.read().await.clone();
-    let model_map = {
-        let upstreams = state.upstreams.read().await;
-        upstreams
-            .iter()
-            .find(|u| u.name == active_name)
-            .map(|u| u.model_map.clone())
-            .unwrap_or_default()
+    // Resolve provider token + model translation (URL stays the same in forward proxy mode)
+    let routing = resolve_routing(&state, captured.model.as_deref()).await;
+    let (override_token, body_bytes) = match routing {
+        Some((_, token, target_model)) => {
+            let bytes = translate_model_in_body(&mut captured, body_bytes, &target_model);
+            (token, bytes)
+        }
+        None => (None, body_bytes),
     };
-    let body_bytes = apply_model_translation(&model_map, &mut captured, body_bytes);
 
     let upstream_req = match state
         .client
         .request(method.clone(), &upstream_url)
-        .headers(forward_headers(&headers))
+        .headers(build_upstream_headers(&headers, override_token.as_deref()))
         .body(body_bytes)
         .build()
     {
         Ok(req) => req,
         Err(e) => {
-            captured.error = Some(format!("Failed to build upstream request: {}", e));
+            captured.error = Some(format!("Failed to build request: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
             let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
@@ -298,38 +313,11 @@ async fn handle_forward_proxy(
         }
     };
 
-    let upstream_resp = match state.client.execute(upstream_req).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            captured.error = Some(format!("Upstream error: {}", e));
-            captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            let _ = state.db.insert_request(&captured);
-            let _ = state.broadcast_send(WsMessage::NewRequest(captured));
-            return Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from(format!("Upstream error: {}", e)))
-                .unwrap();
-        }
-    };
-
-    let status = upstream_resp.status();
-    captured.status_code = Some(status.as_u16());
-    captured.response_headers = redact_headers(upstream_resp.headers());
-
-    let content_type = upstream_resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if content_type.contains("text/event-stream") || captured.is_streaming {
-        handle_streaming_response(state, captured, upstream_resp, start).await
-    } else {
-        handle_non_streaming_response(state, captured, upstream_resp, start).await
-    }
+    dispatch_upstream(state, captured, upstream_req, start).await
 }
 
 // ── Reverse proxy (ANTHROPIC_BASE_URL mode) ──
+// Routes to the provider URL resolved from the active upstream config.
 
 async fn handle_reverse_proxy(
     state: Arc<AppState>,
@@ -340,7 +328,6 @@ async fn handle_reverse_proxy(
 ) -> Response<Body> {
     let start = Instant::now();
 
-    // Collect body
     let body_bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
@@ -351,12 +338,10 @@ async fn handle_reverse_proxy(
         }
     };
 
-    // Build captured request
     let mut captured = ProxiedRequest::new(method.as_str(), uri.path());
     captured.request_headers = redact_headers(&headers);
     captured.request_body = Some(pretty_json(&body_bytes));
 
-    // Parse request body for metadata
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
         captured.model = json.get("model").and_then(|v| v.as_str()).map(String::from);
         captured.is_streaming = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -367,34 +352,38 @@ async fn handle_reverse_proxy(
         }
     }
 
-    // Build upstream URL from dynamic config
-    let upstream_base = state.upstream_target.read().await.clone();
-    let upstream_url = format!("{}{}", upstream_base, uri.path());
-
-    // Override auth if active upstream has its own token, and get model_map
-    let active_name = state.active_upstream.read().await.clone();
-    let (upstream_token, model_map) = {
-        let upstreams = state.upstreams.read().await;
-        let u = upstreams.iter().find(|u| u.name == active_name);
-        let token = u.and_then(|u| u.token.clone());
-        let map = u.map(|u| u.model_map.clone()).unwrap_or_default();
-        (token, map)
+    // Resolve target URL from provider config
+    let routing = resolve_routing(&state, captured.model.as_deref()).await;
+    let (provider_base, provider_token, body_bytes) = match routing {
+        Some((base, token, target_model)) => {
+            let bytes = translate_model_in_body(&mut captured, body_bytes, &target_model);
+            (base, token, bytes)
+        }
+        None => {
+            let msg = "No upstream routing configured. Add providers and configure an upstream.";
+            captured.error = Some(msg.to_string());
+            captured.duration_ms = Some(start.elapsed().as_millis() as u64);
+            let _ = state.db.insert_request(&captured);
+            let _ = state.broadcast_send(WsMessage::NewRequest(captured));
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::from(msg))
+                .unwrap();
+        }
     };
 
-    // Translate model name using upstream model_map
-    let body_bytes = apply_model_translation(&model_map, &mut captured, body_bytes);
+    let upstream_url = format!("{}{}", provider_base, uri.path());
 
-    // Build upstream request
     let upstream_req = match state
         .client
         .request(method.clone(), &upstream_url)
-        .headers(build_upstream_headers(&headers, upstream_token.as_deref()))
+        .headers(build_upstream_headers(&headers, provider_token.as_deref()))
         .body(body_bytes)
         .build()
     {
         Ok(req) => req,
         Err(e) => {
-            captured.error = Some(format!("Failed to build upstream request: {}", e));
+            captured.error = Some(format!("Failed to build request: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
             let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured));
@@ -405,9 +394,22 @@ async fn handle_reverse_proxy(
         }
     };
 
-    let upstream_resp = match state.client.execute(upstream_req).await {
+    dispatch_upstream(state, captured, upstream_req, start).await
+}
+
+// ── Shared upstream dispatch ──
+
+async fn dispatch_upstream(
+    state: Arc<AppState>,
+    captured: ProxiedRequest,
+    upstream_req: reqwest::Request,
+    start: Instant,
+) -> Response<Body> {
+    let retry_count = state.config.proxy.retry_count;
+    let upstream_resp = match execute_with_retry(&state.client, upstream_req, retry_count).await {
         Ok(resp) => resp,
         Err(e) => {
+            let mut captured = captured;
             captured.error = Some(format!("Upstream error: {}", e));
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
             let _ = state.db.insert_request(&captured);
@@ -419,8 +421,8 @@ async fn handle_reverse_proxy(
         }
     };
 
-    let status = upstream_resp.status();
-    captured.status_code = Some(status.as_u16());
+    let mut captured = captured;
+    captured.status_code = Some(upstream_resp.status().as_u16());
     captured.response_headers = redact_headers(upstream_resp.headers());
 
     let content_type = upstream_resp
@@ -436,7 +438,7 @@ async fn handle_reverse_proxy(
     }
 }
 
-// ── Response handlers (shared by both proxy modes) ──
+// ── Response handlers ──
 
 async fn handle_non_streaming_response(
     state: Arc<AppState>,
@@ -451,14 +453,10 @@ async fn handle_non_streaming_response(
         Ok(body_bytes) => {
             captured.response_body = Some(pretty_json(&body_bytes));
             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                captured.message_id = json
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                captured.stop_reason = json
-                    .get("stop_reason")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                captured.message_id =
+                    json.get("id").and_then(|v| v.as_str()).map(String::from);
+                captured.stop_reason =
+                    json.get("stop_reason").and_then(|v| v.as_str()).map(String::from);
                 if let Some(usage) = json.get("usage") {
                     captured.input_tokens =
                         usage.get("input_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
@@ -475,7 +473,6 @@ async fn handle_non_streaming_response(
                 }
             }
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-
             let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured.clone()));
             state.tee_writer.write_exchange(&captured).await;
@@ -509,11 +506,9 @@ async fn handle_streaming_response(
 ) -> Response<Body> {
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
-
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(64);
-
-    let state_clone = state.clone();
     let req_id = captured.id.clone();
+    let state_clone = state.clone();
 
     tokio::spawn(async move {
         let mut stream = upstream_resp.bytes_stream();
@@ -531,7 +526,6 @@ async fn handle_streaming_response(
                         first_token = false;
                     }
                     accumulated_body.push_str(&String::from_utf8_lossy(&bytes));
-
                     let events = parser.feed(&bytes);
                     for ev in &events {
                         let _ = state_clone.broadcast_send(WsMessage::SseEvent {
@@ -547,14 +541,12 @@ async fn handle_streaming_response(
                                 match parser.event_kind(&data) {
                                     Some("message_start") => {
                                         if captured.message_id.is_none() {
-                                            captured.message_id = parser
-                                                .message_id(&data)
-                                                .map(String::from);
+                                            captured.message_id =
+                                                parser.message_id(&data).map(String::from);
                                         }
                                         if captured.model.is_none() {
-                                            captured.model = parser
-                                                .model_from_start(&data)
-                                                .map(String::from);
+                                            captured.model =
+                                                parser.model_from_start(&data).map(String::from);
                                         }
                                         if captured.input_tokens.is_none() {
                                             captured.input_tokens =
@@ -569,9 +561,8 @@ async fn handle_streaming_response(
                                             captured.output_tokens = Some(out_tok);
                                         }
                                         if captured.stop_reason.is_none() {
-                                            captured.stop_reason = parser
-                                                .stop_reason(&data)
-                                                .map(String::from);
+                                            captured.stop_reason =
+                                                parser.stop_reason(&data).map(String::from);
                                         }
                                     }
                                     _ => {}
@@ -596,13 +587,14 @@ async fn handle_streaming_response(
         captured.content_text = merge_delta_text(&captured.sse_events);
 
         let _ = state_clone.db.insert_request(&captured);
-        let _ = state_clone.db.insert_sse_events(&captured.id, &captured.sse_events);
+        let _ = state_clone
+            .db
+            .insert_sse_events(&captured.id, &captured.sse_events);
         let _ = state_clone.broadcast_send(WsMessage::RequestUpdated(captured.clone()));
         state_clone.tee_writer.write_exchange(&captured).await;
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
-
     let mut resp = Response::builder().status(status);
     for (k, v) in resp_headers.iter() {
         let key = k.as_str().to_lowercase();
@@ -614,7 +606,8 @@ async fn handle_streaming_response(
     resp.body(body).unwrap()
 }
 
-/// Pretty-print JSON bytes, falling back to raw string on failure.
+// ── Utilities ──
+
 fn pretty_json(bytes: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
@@ -622,7 +615,6 @@ fn pretty_json(bytes: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(bytes).to_string())
 }
 
-/// Merge content_block_delta text into a single readable string.
 fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
     let parser = SseParser::new();
     let mut blocks: Vec<String> = Vec::new();
@@ -636,7 +628,7 @@ fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
         match parser.event_kind(&parsed) {
             Some("content_block_start") => {
                 if !current.is_empty() {
-                    blocks.push(format_labeled(&current, &current_type));
+                    blocks.push(format_block(&current, &current_type));
                 }
                 current.clear();
                 current_type = parsed
@@ -647,20 +639,31 @@ fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
                     .to_string();
             }
             Some("content_block_delta") => {
-                let delta = parsed.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str());
-                match delta {
+                let delta_type = parsed
+                    .get("delta")
+                    .and_then(|d| d.get("type"))
+                    .and_then(|t| t.as_str());
+                match delta_type {
                     Some("thinking_delta") => {
-                        if let Some(t) = parsed.get("delta").and_then(|d| d.get("thinking")).and_then(|t| t.as_str()) {
+                        if let Some(t) =
+                            parsed.get("delta").and_then(|d| d.get("thinking")).and_then(|t| t.as_str())
+                        {
                             current.push_str(t);
                         }
                     }
                     Some("text_delta") => {
-                        if let Some(t) = parsed.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str()) {
+                        if let Some(t) =
+                            parsed.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str())
+                        {
                             current.push_str(t);
                         }
                     }
                     Some("input_json_delta") => {
-                        if let Some(t) = parsed.get("delta").and_then(|d| d.get("partial_json")).and_then(|t| t.as_str()) {
+                        if let Some(t) = parsed
+                            .get("delta")
+                            .and_then(|d| d.get("partial_json"))
+                            .and_then(|t| t.as_str())
+                        {
                             current.push_str(t);
                         }
                     }
@@ -669,7 +672,7 @@ fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
             }
             Some("content_block_stop") => {
                 if !current.is_empty() {
-                    blocks.push(format_labeled(&current, &current_type));
+                    blocks.push(format_block(&current, &current_type));
                 }
                 current.clear();
                 current_type = "text".to_string();
@@ -678,7 +681,7 @@ fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
         }
     }
     if !current.is_empty() {
-        blocks.push(format_labeled(&current, &current_type));
+        blocks.push(format_block(&current, &current_type));
     }
 
     if blocks.is_empty() {
@@ -688,7 +691,7 @@ fn merge_delta_text(events: &[SseEvent]) -> Option<String> {
     }
 }
 
-fn format_labeled(text: &str, block_type: &str) -> String {
+fn format_block(text: &str, block_type: &str) -> String {
     match block_type {
         "thinking" => format!("[Thinking]\n{}", text.trim()),
         "tool_use" => format!("[Tool Use]\n{}", text.trim()),
