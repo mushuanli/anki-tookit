@@ -6,7 +6,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Json;
-use proxy_core::config::{Provider, TierRule, UpstreamConfig};
+use proxy_core::config::{ModelInfo, Provider, TierRule, UpstreamConfig};
 use proxy_core::export::{export_har, export_json, export_markdown};
 use proxy_core::models::{HookEvent, WsMessage};
 use serde::Deserialize;
@@ -219,7 +219,7 @@ async fn add_provider(
         None => return bad_request("URL is required"),
     };
     let token = payload["token"].as_str().filter(|s| !s.is_empty()).map(String::from);
-    let models = parse_string_array(&payload["models"]);
+    let models = parse_model_list(&payload["models"]);
 
     let mut providers = state.providers.write().await;
     if providers.iter().any(|p| p.name == name) {
@@ -255,7 +255,7 @@ async fn update_provider(
         p.token = tok.as_str().filter(|s| !s.is_empty()).map(String::from);
     }
     if let Some(mods) = payload.get("models") {
-        p.models = parse_string_array(mods);
+        p.models = parse_model_list(mods);
     }
     drop(providers);
 
@@ -604,6 +604,27 @@ async fn capture_status(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 // ── Helpers ──
+
+fn parse_model_list(v: &serde_json::Value) -> Vec<ModelInfo> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|x| {
+                    if let Some(s) = x.as_str() {
+                        ModelInfo::new(s.to_string())
+                    } else {
+                        ModelInfo {
+                            id: x["id"].as_str().unwrap_or("").to_string(),
+                            price_per_million_input: x["price_per_million_input"].as_f64(),
+                            price_per_million_output: x["price_per_million_output"].as_f64(),
+                        }
+                    }
+                })
+                .filter(|m| !m.id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn parse_string_array(v: &serde_json::Value) -> Vec<String> {
     v.as_array()

@@ -46,6 +46,10 @@ pub struct ProxiedRequest {
     pub output_tokens: Option<u32>,
     pub cache_creation_input_tokens: Option<u32>,
     pub cache_read_input_tokens: Option<u32>,
+    /// Cumulative input tokens across all requests in the session up to this point.
+    pub total_input_tokens: Option<u64>,
+    /// Cumulative output tokens across all requests in the session up to this point.
+    pub total_output_tokens: Option<u64>,
     // Streaming
     pub sse_events: Vec<SseEvent>,
     pub content_text: Option<String>,
@@ -165,7 +169,7 @@ pub struct ProviderInfo {
     pub name: String,
     pub url: String,
     pub has_token: bool,
-    pub models: Vec<String>,
+    pub models: Vec<crate::config::ModelInfo>,
 }
 
 // ── Upstream info (for frontend) ──

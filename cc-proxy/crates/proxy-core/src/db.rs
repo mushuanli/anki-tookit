@@ -101,6 +101,11 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_mcp_timestamp ON mcp_requests(timestamp);
             ",
         )?;
+        // Add total_input_tokens / total_output_tokens columns if not present (idempotent).
+        let _ = conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN total_input_tokens INTEGER;
+             ALTER TABLE requests ADD COLUMN total_output_tokens INTEGER;",
+        );
         Ok(())
     }
 
@@ -212,8 +217,9 @@ impl Database {
             "INSERT INTO requests (id, session_id, timestamp, method, path, model,
              status_code, input_tokens, output_tokens, cache_creation_input_tokens,
              cache_read_input_tokens, duration_ms, ttft_ms, stop_reason, message_id,
-             error, request_headers, request_body, content_text, is_streaming)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             error, request_headers, request_body, content_text, is_streaming,
+             total_input_tokens, total_output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 req.id,
                 req.session_id,
@@ -235,6 +241,8 @@ impl Database {
                 req.request_body,
                 req.content_text,
                 req.is_streaming as i32,
+                req.total_input_tokens.map(|v| v as i64),
+                req.total_output_tokens.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -246,8 +254,9 @@ impl Database {
             "UPDATE requests SET status_code=?1, input_tokens=?2, output_tokens=?3,
              cache_creation_input_tokens=?4, cache_read_input_tokens=?5,
              duration_ms=?6, ttft_ms=?7, stop_reason=?8, message_id=?9,
-             error=?10, content_text=?11, model=?12
-             WHERE id=?13",
+             error=?10, content_text=?11, model=?12,
+             total_input_tokens=?13, total_output_tokens=?14
+             WHERE id=?15",
             params![
                 req.status_code,
                 req.input_tokens,
@@ -261,6 +270,8 @@ impl Database {
                 req.error,
                 req.content_text,
                 req.model,
+                req.total_input_tokens.map(|v| v as i64),
+                req.total_output_tokens.map(|v| v as i64),
                 req.id,
             ],
         )?;
@@ -355,6 +366,18 @@ impl Database {
     pub fn count_requests(&self) -> Result<i64, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+    }
+
+    /// Sum input_tokens and output_tokens for all completed requests in a session,
+    /// used to compute running totals when a new request completes.
+    pub fn sum_session_tokens(&self, session_id: &str) -> Result<(u64, u64), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+             FROM requests WHERE session_id = ?1 AND status_code IS NOT NULL",
+            params![session_id],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+        )
     }
 
     pub fn clear_requests(&self) -> Result<(), rusqlite::Error> {
@@ -517,7 +540,8 @@ fn request_select_sql(with_where: bool) -> String {
         "SELECT id, session_id, timestamp, method, path, model, status_code,
          input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
          duration_ms, ttft_ms, stop_reason, message_id, error, request_headers,
-         request_body, content_text, is_streaming
+         request_body, content_text, is_streaming,
+         total_input_tokens, total_output_tokens
          FROM requests",
     );
     if with_where {
@@ -551,6 +575,8 @@ fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<ProxiedRequest> {
         request_body: row.get(17)?,
         content_text: row.get(18)?,
         is_streaming: row.get::<_, i32>(19)? != 0,
+        total_input_tokens: row.get::<_, Option<i64>>(20)?.map(|v| v as u64),
+        total_output_tokens: row.get::<_, Option<i64>>(21)?.map(|v| v as u64),
         ..Default::default()
     })
 }

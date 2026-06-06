@@ -177,6 +177,32 @@ td.status-5xx { color: var(--error); }
 .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent2); }
 .form-group-col { flex-direction: column; align-items: flex-start; }
 .form-group-col label { width: auto; text-align: left; margin-bottom: 4px; }
+.form-group-row { flex-wrap: wrap; }
+.form-group-row label { width: auto; }
+.form-group input[type="number"] {
+    width: 140px; background: var(--bg-panel); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 5px; font-size: 0.82rem; font-family: var(--font-mono);
+}
+
+td.col-cost { color: var(--warning); font-family: var(--font-mono); font-size: 0.8rem; }
+
+/* ── Model edit row (per-model pricing) ── */
+.model-edit-list { display: flex; flex-direction: column; gap: 4px; }
+.model-edit-row {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 8px;
+}
+.model-edit-id { flex: 1; font-family: var(--font-mono); font-size: 0.82rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-price-in, .model-price-out {
+    width: 72px; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 3px 6px; border-radius: 4px; font-size: 0.75rem; font-family: var(--font-mono);
+    text-align: right;
+}
+.model-price-in::placeholder { color: var(--text-muted); font-size: 0.7rem; }
+.model-price-out::placeholder { color: var(--text-muted); font-size: 0.7rem; }
+
+.hint { font-size: 0.7rem; color: var(--text-muted); font-weight: 400; }
 
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 

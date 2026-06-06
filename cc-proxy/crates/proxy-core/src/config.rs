@@ -1,15 +1,46 @@
+use serde::de;
 use serde::{Deserialize, Serialize};
 
-/// A cloud provider: URL, auth token, and available model IDs.
+/// Price and metadata for a single model on a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    /// Input token price in CNY per million tokens. Defaults to 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_per_million_input: Option<f64>,
+    /// Output token price in CNY per million tokens. Defaults to 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_per_million_output: Option<f64>,
+}
+
+impl ModelInfo {
+    pub fn new(id: String) -> Self {
+        Self { id, price_per_million_input: None, price_per_million_output: None }
+    }
+}
+
+/// A cloud provider: URL, auth token, and available model definitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub name: String,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// Model IDs available on this provider (used for UI suggestions).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
+    /// Model definitions. Deserialization accepts both strings (old format) and
+    /// full `{id, price_per_million_input, price_per_million_output}` objects.
+    #[serde(default, deserialize_with = "deserialize_models", skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelInfo>,
+}
+
+/// Accepts either `"model-id"` (string) or `{id = "model-id", ...}` (object).
+fn deserialize_models<'de, D: de::Deserializer<'de>>(d: D) -> Result<Vec<ModelInfo>, D::Error> {
+    let raw: Vec<serde_json::Value> = Vec::deserialize(d)?;
+    raw.into_iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => Ok(ModelInfo::new(s)),
+            _ => serde_json::from_value(v).map_err(de::Error::custom),
+        })
+        .collect()
 }
 
 /// A tier routing rule: when the request model name contains any keyword (case-insensitive),

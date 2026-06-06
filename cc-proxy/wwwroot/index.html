@@ -62,8 +62,9 @@
                             <th>Status</th>
                             <th>Model</th>
                             <th>Session</th>
-                            <th>In</th>
-                            <th>Out</th>
+                            <th>In/Out</th>
+                            <th>Total In/Out</th>
+                            <th>Cost</th>
                             <th>Duration</th>
                             <th>TTFT</th>
                             <th></th>
@@ -184,8 +185,8 @@
                             <input type="password" id="pe-token" placeholder="sk-... (leave empty to keep)">
                         </div>
                         <div class="form-group form-group-col">
-                            <label>Models</label>
-                            <div id="pe-models-list" class="model-tag-list"></div>
+                            <label>Models <span class="hint">(¥ / million tokens, default input=5 output=25)</span></label>
+                            <div id="pe-models-list" class="model-edit-list"></div>
                             <div class="model-add-row">
                                 <input type="text" id="pe-model-input" placeholder="Add model ID...">
                                 <button id="pe-model-add-btn">+</button>

@@ -32,7 +32,7 @@ function connect() {
         const el = document.getElementById('connection-status');
         el.className = 'connected';
         el.textContent = 'Connected';
-        console.debug('[ws] connected');
+        console.debug('[ws] connected at', new Date().toISOString());
     };
 
     ws.onclose = (ev) => {
@@ -43,13 +43,13 @@ function connect() {
                     : ev.code === 1005 ? 'Disconnected (timeout)'
                     : `Disconnected (${ev.code})`;
         el.textContent = label;
-        console.debug(`[ws] closed code=${ev.code} reason="${ev.reason}", retry in ${_reconnectDelay}ms`);
+        console.warn(`[ws] closed at ${new Date().toISOString()} — code=${ev.code} reason="${ev.reason}" clean=${ev.wasClean}, retry in ${_reconnectDelay}ms`);
         setTimeout(connect, _reconnectDelay);
         _reconnectDelay = Math.min(_reconnectDelay * 2, _RECONNECT_MAX);
     };
 
     ws.onerror = (e) => {
-        console.error('WebSocket error', e);
+        console.error('[ws] error', e);
         ws.close(); // triggers onclose → retry
     };
 
@@ -60,6 +60,7 @@ function connect() {
 }
 
 function handleMessage(msg) {
+    console.debug('[ws] msg type=' + msg.type);
     switch (msg.type) {
         case 'History':
             // Requests are loaded via REST GET /api/requests — this WS branch is kept
@@ -186,6 +187,15 @@ function buildRequestRowHTML(req) {
         else statusClass = 'status-5xx';
     }
     const checked = selectedIds.has(req.id) ? 'checked' : '';
+
+    const inOut = (req.input_tokens != null || req.output_tokens != null)
+        ? `${req.input_tokens ?? 0}/${req.output_tokens ?? 0}`
+        : '—';
+    const totalInOut = (req.total_input_tokens != null || req.total_output_tokens != null)
+        ? `${req.total_input_tokens ?? 0}/${req.total_output_tokens ?? 0}`
+        : '—';
+    const costStr = formatCost(req);
+
     return `
         <td class="col-chk"><input type="checkbox" class="row-chk" data-id="${req.id}" ${checked}></td>
         <td>${formatTime(req.timestamp)}</td>
@@ -194,12 +204,40 @@ function buildRequestRowHTML(req) {
         <td class="${statusClass}">${req.status_code || '—'}</td>
         <td>${esc(req.model || '—')}</td>
         <td>${esc(req.session_id?.substring(0, 8) || '—')}</td>
-        <td>${req.input_tokens || '—'}</td>
-        <td>${req.output_tokens || '—'}</td>
+        <td>${inOut}</td>
+        <td>${totalInOut}</td>
+        <td class="col-cost">${costStr}</td>
         <td>${req.duration_ms != null ? req.duration_ms + 'ms' : '—'}</td>
         <td>${req.time_to_first_token_ms != null ? req.time_to_first_token_ms + 'ms' : '—'}</td>
         <td class="row-actions"><button class="btn-delete-row" data-id="${req.id}" title="Delete">×</button></td>
     `;
+}
+
+function lookupProviderPrice(model) {
+    if (!model) return null;
+    for (const p of providerList) {
+        if (p.models && Array.isArray(p.models)) {
+            const match = p.models.find(m => m.id === model);
+            if (match) {
+                return {
+                    in: match.price_per_million_input ?? 5,
+                    out: match.price_per_million_output ?? 25,
+                };
+            }
+        }
+    }
+    return null;
+}
+
+function formatCost(req) {
+    const price = lookupProviderPrice(req.model);
+    if (!price) return '—';
+    const inCost = (req.input_tokens ?? 0) * price.in / 1_000_000;
+    const outCost = (req.output_tokens ?? 0) * price.out / 1_000_000;
+    const total = inCost + outCost;
+    if (total === 0) return '¥0.00';
+    if (total < 0.001) return `¥${total.toFixed(5)}`;
+    return `¥${total.toFixed(4)}`;
 }
 
 // ── Request detail ──
@@ -490,24 +528,34 @@ function renderProviderList() {
         container.innerHTML = '<div class="item-empty">No providers configured</div>';
         return;
     }
-    container.innerHTML = providerList.map(p => `
+    container.innerHTML = providerList.map(p => {
+        const modelPricing = (p.models || []).map(m => {
+            const pIn = m.price_per_million_input ?? 5;
+            const pOut = m.price_per_million_output ?? 25;
+            return `${m.id}:￥${pIn}/${pOut}`;
+        }).join(', ');
+        return `
         <div class="item-row">
             <div class="item-row-info">
                 <div class="item-row-name">${esc(p.name)}</div>
-                <div class="item-row-meta">${esc(p.url)}${p.has_token ? ' · 🔑' : ''}${p.models.length ? ` · ${p.models.length} model${p.models.length !== 1 ? 's' : ''}` : ''}</div>
+                <div class="item-row-meta">${esc(p.url)}${p.has_token ? ' · 🔑' : ''}${p.models && p.models.length ? ` · ${p.models.length} model${p.models.length !== 1 ? 's' : ''}` : ''}${modelPricing ? ` · ${modelPricing}` : ''}</div>
             </div>
             <div class="item-row-actions">
                 <button class="btn-sm" onclick="openProviderEdit('${esc(p.name)}')">Edit</button>
                 <button class="btn-sm btn-danger" onclick="deleteProvider('${esc(p.name)}')">×</button>
             </div>
         </div>
-    `).join('');
+    `}).join('');
 }
 
 function openProviderEdit(name) {
     const p = name ? providerList.find(p => p.name === name) : null;
     providerEditMode = p ? 'edit' : 'add';
-    providerEditModels = p ? [...p.models] : [];
+    providerEditModels = p ? (p.models || []).map(m => ({
+        id: m.id,
+        price_per_million_input: m.price_per_million_input ?? null,
+        price_per_million_output: m.price_per_million_output ?? null,
+    })) : [];
 
     document.getElementById('pe-name').value = p ? p.name : '';
     document.getElementById('pe-name').disabled = !!p;
@@ -526,12 +574,19 @@ function renderProviderModelList() {
         container.innerHTML = '<div class="model-empty">No models added yet</div>';
         return;
     }
-    container.innerHTML = providerEditModels.map((m, i) => `
-        <div class="model-tag">
-            <span>${esc(m)}</span>
+    container.innerHTML = providerEditModels.map((m, i) => {
+        const pin = m.price_per_million_input != null ? m.price_per_million_input : '';
+        const pout = m.price_per_million_output != null ? m.price_per_million_output : '';
+        return `
+        <div class="model-edit-row">
+            <span class="model-edit-id">${esc(m.id)}</span>
+            <input type="number" class="model-price-in" placeholder="in=5" min="0" step="0.01"
+                   value="${pin}" onchange="providerEditModels[${i}].price_per_million_input = this.value ? parseFloat(this.value) : null">
+            <input type="number" class="model-price-out" placeholder="out=25" min="0" step="0.01"
+                   value="${pout}" onchange="providerEditModels[${i}].price_per_million_output = this.value ? parseFloat(this.value) : null">
             <button class="model-tag-del" onclick="removeProviderModel(${i})">×</button>
         </div>
-    `).join('');
+    `}).join('');
 }
 
 function removeProviderModel(i) {
@@ -542,8 +597,8 @@ function removeProviderModel(i) {
 document.getElementById('pe-model-add-btn').addEventListener('click', () => {
     const input = document.getElementById('pe-model-input');
     const val = input.value.trim();
-    if (val && !providerEditModels.includes(val)) {
-        providerEditModels.push(val);
+    if (val && !providerEditModels.some(m => m.id === val)) {
+        providerEditModels.push({ id: val, price_per_million_input: null, price_per_million_output: null });
         renderProviderModelList();
     }
     input.value = '';

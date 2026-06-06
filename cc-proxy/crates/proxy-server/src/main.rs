@@ -173,10 +173,34 @@ fn provider_to_toml(p: &Provider) -> toml::Value {
         t.insert("token".into(), toml::Value::String(token.clone()));
     }
     if !p.models.is_empty() {
-        t.insert(
-            "models".into(),
-            toml::Value::Array(p.models.iter().map(|s| toml::Value::String(s.clone())).collect()),
-        );
+        // If any model has pricing, write all as array of tables;
+        // otherwise write as plain strings for compactness.
+        let has_pricing = p.models.iter().any(|m| {
+            m.price_per_million_input.is_some() || m.price_per_million_output.is_some()
+        });
+        if has_pricing {
+            let arr: Vec<toml::Value> = p.models.iter().map(model_to_toml).collect();
+            t.insert("models".into(), toml::Value::Array(arr));
+        } else {
+            let arr: Vec<toml::Value> = p
+                .models
+                .iter()
+                .map(|m| toml::Value::String(m.id.clone()))
+                .collect();
+            t.insert("models".into(), toml::Value::Array(arr));
+        }
+    }
+    toml::Value::Table(t)
+}
+
+fn model_to_toml(m: &proxy_core::config::ModelInfo) -> toml::Value {
+    let mut t = toml::value::Table::new();
+    t.insert("id".into(), toml::Value::String(m.id.clone()));
+    if let Some(v) = m.price_per_million_input {
+        t.insert("price_per_million_input".into(), toml::Value::Float(v));
+    }
+    if let Some(v) = m.price_per_million_output {
+        t.insert("price_per_million_output".into(), toml::Value::Float(v));
     }
     toml::Value::Table(t)
 }
