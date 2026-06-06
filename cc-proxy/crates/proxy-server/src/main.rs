@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use tracing_subscriber::EnvFilter;
 
-use proxy_core::config::{AppConfig, Provider, TierRule, UpstreamConfig};
+use proxy_core::config::{AppConfig, Provider, Retention, TierRule, UpstreamConfig};
 use proxy_core::models::{ProviderInfo, TierRuleInfo, UpstreamInfo, WsMessage};
 use proxy_core::Database;
 use tee::TeeWriter;
@@ -24,6 +24,7 @@ pub struct AppState {
     pub providers: RwLock<Vec<Provider>>,
     pub upstreams: RwLock<Vec<UpstreamConfig>>,
     pub active_upstream: RwLock<String>,
+    pub retention: RwLock<Retention>,
     pub tee_writer: TeeWriter,
     pub broadcaster: broadcast::Sender<WsMessage>,
     pub client: reqwest::Client,
@@ -36,6 +37,10 @@ impl AppState {
         let providers = config.proxy.providers.clone();
         let upstreams = config.proxy.upstreams.clone();
         let active_name = config.proxy.active_upstream.clone();
+        let retention = Retention {
+            request_retention_hours: config.proxy.request_retention_hours,
+            session_max_count: config.proxy.session_max_count,
+        };
 
         let db_path = PathBuf::from("data.db");
         let db = Database::open(db_path.to_str().unwrap())
@@ -47,6 +52,7 @@ impl AppState {
             providers: RwLock::new(providers),
             upstreams: RwLock::new(upstreams),
             active_upstream: RwLock::new(active_name),
+            retention: RwLock::new(retention),
             tee_writer: TeeWriter::new(enabled, PathBuf::from("captures")),
             broadcaster: tx,
             client: reqwest::Client::builder()
@@ -109,11 +115,12 @@ impl AppState {
         }
     }
 
-    /// Persist providers and upstreams to config.toml.
+    /// Persist providers, upstreams, and retention settings to config.toml.
     pub async fn persist_config(&self) {
         let providers = self.providers.read().await.clone();
         let upstreams = self.upstreams.read().await.clone();
         let active = self.active_upstream.read().await.clone();
+        let retention = self.retention.read().await.clone();
 
         let content = match std::fs::read_to_string(&self.config_path) {
             Ok(c) => c,
@@ -143,6 +150,16 @@ impl AppState {
         proxy.insert("upstreams".into(), toml::Value::Array(up_arr));
         proxy.insert("active_upstream".into(), toml::Value::String(active));
 
+        // Persist retention
+        proxy.insert(
+            "request_retention_hours".into(),
+            toml::Value::Integer(retention.request_retention_hours as i64),
+        );
+        proxy.insert(
+            "session_max_count".into(),
+            toml::Value::Integer(retention.session_max_count as i64),
+        );
+
         // Remove legacy fields
         proxy.remove("api_target");
 
@@ -154,6 +171,57 @@ impl AppState {
             }
             Err(e) => tracing::error!("Failed to serialize config.toml: {}", e),
         }
+    }
+}
+
+/// Shared cleanup logic — used by both the background task and the manual API endpoint.
+pub async fn run_cleanup(state: &AppState) -> (usize, usize) {
+    let retention = state.retention.read().await.clone();
+    let mut deleted_requests = 0;
+    let mut deleted_sessions = 0;
+
+    if retention.request_retention_hours > 0 {
+        let keep = state.db.latest_session_id();
+        match state
+            .db
+            .cleanup_old_requests(retention.request_retention_hours, keep.as_deref())
+        {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!("Cleaned up {} old requests", n);
+                }
+                deleted_requests = n;
+            }
+            Err(e) => tracing::error!("Failed to clean up old requests: {}", e),
+        }
+    }
+
+    if retention.session_max_count > 0 {
+        match state.db.cleanup_old_sessions(retention.session_max_count) {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!("Cleaned up {} old sessions", n);
+                }
+                deleted_sessions = n;
+            }
+            Err(e) => tracing::error!("Failed to clean up old sessions: {}", e),
+        }
+    }
+
+    (deleted_requests, deleted_sessions)
+}
+
+/// Background task that periodically cleans up old data.
+async fn cleanup_loop(state: Arc<AppState>) {
+    // Run once at startup
+    run_cleanup(&state).await;
+
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30 * 60));
+    interval.tick().await; // skip immediate first tick (already ran above)
+
+    loop {
+        interval.tick().await;
+        run_cleanup(&state).await;
     }
 }
 
@@ -296,6 +364,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let listen_addr = &config.server.listen_address;
+
+    // Spawn background cleanup task
+    tokio::spawn(cleanup_loop(state.clone()));
 
     let dashboard_router = api::build_router(state.clone());
     let proxy_router = proxy::build_router(state.clone());

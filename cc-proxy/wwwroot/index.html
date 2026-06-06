@@ -281,6 +281,34 @@
                     </div>
                 </div>
 
+                <!-- Data Retention panel -->
+                <div class="settings-panel">
+                    <div class="settings-panel-header">
+                        <h2>Data Retention</h2>
+                    </div>
+                    <div class="retention-form">
+                        <div class="form-group">
+                            <label>Keep all requests (hours)</label>
+                            <input type="number" id="ret-hours" min="0" value="72" style="width:80px">
+                            <span class="hint">0=never clean</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Max sessions</label>
+                            <input type="number" id="ret-max-sessions" min="0" value="20" style="width:80px">
+                            <span class="hint">0=unlimited</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Last cleanup</label>
+                            <span id="ret-last-cleanup" class="hint">—</span>
+                        </div>
+                        <div class="form-actions">
+                            <button id="btn-retention-save" class="btn-primary">Save</button>
+                            <button id="btn-cleanup-now">Clean Up Now</button>
+                        </div>
+                        <div id="ret-cleanup-result" class="cleanup-result hidden"></div>
+                    </div>
+                </div>
+
             </div>
         </section>
     </main>

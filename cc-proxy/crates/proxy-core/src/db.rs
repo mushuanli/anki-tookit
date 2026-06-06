@@ -386,6 +386,60 @@ impl Database {
         Ok(())
     }
 
+    /// Find the session ID with the most recent request.
+    pub fn latest_session_id(&self) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT session_id FROM requests WHERE session_id IS NOT NULL ORDER BY timestamp DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// Delete requests older than `hours`, except those in `keep_session_id`.
+    /// SSE events are cascade-deleted. Returns count of deleted rows.
+    pub fn cleanup_old_requests(
+        &self,
+        hours: u32,
+        keep_session_id: Option<&str>,
+    ) -> Result<usize, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let n = match keep_session_id {
+            Some(sid) => conn.execute(
+                "DELETE FROM requests WHERE
+                 timestamp < datetime('now', '-' || ?1 || ' hours')
+                 AND (session_id IS NULL OR session_id != ?2)",
+                params![hours, sid],
+            )?,
+            None => conn.execute(
+                "DELETE FROM requests WHERE timestamp < datetime('now', '-' || ?1 || ' hours')",
+                params![hours],
+            )?,
+        };
+        Ok(n)
+    }
+
+    /// Keep at most `max_count` sessions (by started_at DESC). Delete the rest.
+    /// Requests from deleted sessions get session_id set to NULL (FK cascade).
+    /// Returns count of deleted sessions.
+    pub fn cleanup_old_sessions(&self, max_count: u32) -> Result<usize, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+        if total <= max_count as i64 {
+            return Ok(0);
+        }
+        let n = conn.execute(
+            "DELETE FROM sessions WHERE id IN (
+             SELECT id FROM sessions ORDER BY started_at ASC LIMIT ?1
+            )",
+            params![total - max_count as i64],
+        )?;
+        Ok(n)
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // SSE Events
     // ═══════════════════════════════════════════════════════════════

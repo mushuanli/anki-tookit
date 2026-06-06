@@ -15,7 +15,7 @@ use crate::AppState;
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Close the connection if no Pong has been received within this window.
-const DEAD_TIMEOUT: Duration = Duration::from_secs(60);
+const DEAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 
 pub async fn ws_handler(
@@ -58,16 +58,30 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     // Timestamp of the last pong (or connection start).
     let mut last_pong = tokio::time::Instant::now();
+    // Warning thresholds: track the last warning level to avoid log spam.
+    let mut last_warned: u8 = 0;
 
     loop {
         tokio::select! {
             // ── Heartbeat ping ──
             _ = ping_ticker.tick() => {
+                let elapsed = last_pong.elapsed().as_secs();
+                // Early warnings before dead timeout
+                if elapsed > 240 && last_warned < 3 {
+                    tracing::warn!("WebSocket no pong for {}s", elapsed);
+                    last_warned = 3;
+                } else if elapsed > 220 && last_warned < 2 {
+                    tracing::warn!("WebSocket no pong for {}s", elapsed);
+                    last_warned = 2;
+                } else if elapsed > 200 && last_warned < 1 {
+                    tracing::warn!("WebSocket no pong for {}s", elapsed);
+                    last_warned = 1;
+                }
                 // Disconnect only if silent for longer than DEAD_TIMEOUT.
-                if last_pong.elapsed() > DEAD_TIMEOUT {
+                if elapsed > DEAD_TIMEOUT.as_secs() {
                     tracing::debug!(
                         "WebSocket dead — no pong for {}s, closing",
-                        last_pong.elapsed().as_secs()
+                        elapsed
                     );
                     break;
                 }
@@ -100,6 +114,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(Message::Pong(_))) => {
                         tracing::trace!("WebSocket ← pong");
                         last_pong = tokio::time::Instant::now();
+                        last_warned = 0;
                     }
                     Some(Ok(Message::Ping(data))) => {
                         // Browser-initiated ping — respond immediately

@@ -5,23 +5,43 @@ level = "info"
 active_upstream = "deepseek"
 hook_store_capacity = 1000
 mcp_store_capacity = 500
+request_retention_hours = 8
 request_store_capacity = 1000
+session_max_count = 2000
 
-[[proxy.upstreams]]
+[[proxy.providers]]
 name = "deepseek"
 url = "https://api.deepseek.com/anthropic"
 
-# Translate Claude model names → upstream equivalents.
-# Keys use prefix matching: "claude-sonnet-4-6" matches "claude-sonnet-4-6-20250514" etc.
-# [1m] suffix is preserved automatically.
-[proxy.upstreams.model_map]
-"claude-sonnet-4-6" = "deepseek-v4-pro"
-"claude-opus-4-6" = "deepseek-v4-pro[1m]"
-"claude-haiku-4-5" = "deepseek-chat"
+[[proxy.providers.models]]
+id = "deepseek-v4-pro"
+price_per_million_input = 3.0
+price_per_million_output = 6.0
+
+[[proxy.providers.models]]
+id = "deepseek-v4-flash"
+price_per_million_input = 1.0
+price_per_million_output = 2.0
 
 [[proxy.upstreams]]
-name = "anthropic"
-url = "https://api.anthropic.com"
+default_model = "deepseek-v4-pro"
+default_provider = "deepseek"
+name = "deepseek"
+
+[proxy.upstreams.high]
+keywords = ["opus"]
+model = "deepseek-v4-pro"
+provider = "deepseek"
+
+[proxy.upstreams.low]
+keywords = ["haiku"]
+model = "deepseek-v4-pro"
+provider = "deepseek"
+
+[proxy.upstreams.mid]
+keywords = ["sonnet"]
+model = "deepseek-v4-pro"
+provider = "deepseek"
 
 [server]
 http_port = 5000

@@ -17,6 +17,7 @@ Claude Code API 透明代理 — 拦截、可视化、分析 AI Coding Agent 的
 - **数据库**: SQLite（`data.db`，WAL 模式）
 - **持久化**: 运行时配置变更写入 `config.toml`
 
+[img](./cc-proxy.png)
 ## 架构总览（3 个端口）
 
 ```

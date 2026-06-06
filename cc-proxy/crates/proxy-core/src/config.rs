@@ -156,6 +156,13 @@ pub struct ProxyConfig {
     pub mcp_store_capacity: usize,
     #[serde(default = "default_hook_capacity")]
     pub hook_store_capacity: usize,
+    /// How many hours to keep ALL chat records. Beyond this, only the
+    /// latest session's requests are kept. 0 = never clean.
+    #[serde(default = "default_retention_hours")]
+    pub request_retention_hours: u32,
+    /// Max sessions to keep. Oldest deleted when exceeded. 0 = unlimited.
+    #[serde(default = "default_max_sessions")]
+    pub session_max_count: u32,
 }
 
 impl ProxyConfig {
@@ -169,6 +176,13 @@ impl ProxyConfig {
                 .unwrap_or_default();
         }
     }
+}
+
+/// Runtime retention settings (mirrors ProxyConfig fields, but kept in a RwLock).
+#[derive(Debug, Clone)]
+pub struct Retention {
+    pub request_retention_hours: u32,
+    pub session_max_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +214,8 @@ fn default_retry_count() -> u32 { 3 }
 fn default_request_capacity() -> usize { 1000 }
 fn default_mcp_capacity() -> usize { 500 }
 fn default_hook_capacity() -> usize { 1000 }
+fn default_retention_hours() -> u32 { 72 }
+fn default_max_sessions() -> u32 { 20 }
 fn default_http_port() -> u16 { 5000 }
 fn default_proxy_port() -> u16 { 8888 }
 fn default_mcp_proxy_port() -> u16 { 9999 }
@@ -217,6 +233,8 @@ impl Default for AppConfig {
                 request_store_capacity: default_request_capacity(),
                 mcp_store_capacity: default_mcp_capacity(),
                 hook_store_capacity: default_hook_capacity(),
+                request_retention_hours: default_retention_hours(),
+                session_max_count: default_max_sessions(),
             },
             server: ServerConfig {
                 http_port: default_http_port(),

@@ -54,6 +54,9 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Capture
         .route("/api/capture", post(toggle_capture))
         .route("/api/capture/status", get(capture_status))
+        // Retention & cleanup
+        .route("/api/retention", get(get_retention).put(update_retention))
+        .route("/api/cleanup", post(trigger_cleanup))
         // Static files
         .fallback(get(serve_static))
         .with_state(state)
@@ -601,6 +604,47 @@ async fn toggle_capture(
 
 async fn capture_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({"enabled": state.tee_writer.is_enabled()}))
+}
+
+// ── Retention & Cleanup ──
+
+async fn get_retention(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let r = state.retention.read().await.clone();
+    Json(serde_json::json!({
+        "request_retention_hours": r.request_retention_hours,
+        "session_max_count": r.session_max_count,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RetentionPayload {
+    request_retention_hours: Option<u32>,
+    session_max_count: Option<u32>,
+}
+
+async fn update_retention(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RetentionPayload>,
+) -> impl IntoResponse {
+    let mut r = state.retention.write().await;
+    if let Some(h) = payload.request_retention_hours {
+        r.request_retention_hours = h;
+    }
+    if let Some(c) = payload.session_max_count {
+        r.session_max_count = c;
+    }
+    drop(r);
+    state.persist_config().await;
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn trigger_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (reqs, sessions) = crate::run_cleanup(&state).await;
+    Json(serde_json::json!({
+        "ok": true,
+        "deleted_requests": reqs,
+        "deleted_sessions": sessions,
+    }))
 }
 
 // ── Helpers ──

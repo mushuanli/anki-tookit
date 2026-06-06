@@ -26,6 +26,7 @@ nav a:hover { background: var(--bg-card); color: var(--text); }
 nav a.active { background: var(--accent2); color: white; }
 .status-bar { margin-left: auto; display: flex; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
 #connection-status.connected { color: var(--success); }
+#connection-status.connected.silent { color: var(--warning); }
 #connection-status.disconnected { color: var(--error); }
 
 /* ── Main / Views ── */
@@ -96,7 +97,12 @@ td.status-5xx { color: var(--error); }
 .tab.active { color: var(--accent2); border-bottom-color: var(--accent2); }
 .detail-body { padding: 14px; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; flex: 1; overflow-y: auto; background: var(--bg); color: var(--text); }
 .detail-headers, .detail-plain { margin: 0 0 10px 0; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: var(--text-muted); }
-.detail-headers { padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.detail-headers { padding-bottom: 10px; }
+
+.foldable-section { margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.foldable-section summary { cursor: pointer; color: var(--text-muted); font-size: 0.8rem; user-select: none; }
+.foldable-section summary:hover { color: var(--text); }
+.foldable-section .detail-headers { border-bottom: none; padding-bottom: 0; margin-top: 6px; }
 
 /* ── Timeline ── */
 .timeline { max-height: 50vh; overflow-y: auto; padding: 6px 0; }
@@ -141,7 +147,7 @@ td.status-5xx { color: var(--error); }
 /* ── Settings view ── */
 #view-settings { padding: 0; }
 
-.settings-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+.settings-layout { display: grid; grid-template-columns: 1fr 1fr 280px; gap: 20px; align-items: start; }
 
 @media (max-width: 900px) { .settings-layout { grid-template-columns: 1fr; } }
 
@@ -203,6 +209,17 @@ td.col-cost { color: var(--warning); font-family: var(--font-mono); font-size: 0
 .model-price-out::placeholder { color: var(--text-muted); font-size: 0.7rem; }
 
 .hint { font-size: 0.7rem; color: var(--text-muted); font-weight: 400; }
+
+/* ── Data Retention ── */
+.retention-form { padding: 14px 16px; }
+.retention-form .form-group { flex-wrap: wrap; }
+.retention-form .form-group label { width: auto; text-align: left; }
+.retention-form input[type="number"] {
+    width: 80px; background: var(--bg-panel); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 8px; border-radius: 5px; font-size: 0.82rem; font-family: var(--font-mono);
+}
+.cleanup-result { margin-top: 8px; padding: 8px 10px; border-radius: 5px; font-size: 0.78rem; background: var(--bg-panel); border: 1px solid var(--border); }
+.cleanup-result.success { border-color: var(--success); color: var(--success); }
 
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 

@@ -7,6 +7,8 @@ let captureEnabled = false;
 // Reconnection with exponential backoff: 1s → 2s → 4s → … → 30s max
 let _reconnectDelay = 1000;
 const _RECONNECT_MAX = 30000;
+let _lastMsgTime = Date.now();
+let _silentTimer = null;
 
 // ── Pagination & filter state ──
 let currentPage = 1;
@@ -28,17 +30,21 @@ function connect() {
     ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
     ws.onopen = () => {
-        _reconnectDelay = 1000; // reset backoff on success
+        _reconnectDelay = 1000;
+        _lastMsgTime = Date.now();
         const el = document.getElementById('connection-status');
         el.className = 'connected';
         el.textContent = 'Connected';
         console.debug('[ws] connected at', new Date().toISOString());
+        startSilentCheck();
     };
 
     ws.onclose = (ev) => {
+        clearInterval(_silentTimer);
+        clearTimeout(_updateFilterTimer);
+        clearTimeout(_renderPageTimer);
         const el = document.getElementById('connection-status');
         el.className = 'disconnected';
-        // code 1000 = normal, 1005 = no close frame (NAT/firewall/idle timeout)
         const label = ev.code === 1000 ? 'Disconnected'
                     : ev.code === 1005 ? 'Disconnected (timeout)'
                     : `Disconnected (${ev.code})`;
@@ -60,6 +66,7 @@ function connect() {
 }
 
 function handleMessage(msg) {
+    _lastMsgTime = Date.now();
     console.debug('[ws] msg type=' + msg.type);
     switch (msg.type) {
         case 'History':
@@ -171,12 +178,19 @@ function upsertRequestRow(req) {
     const isNew = !requestRows.has(req.id);
     requestRows.set(req.id, req);
     if (isNew || req.id === selectedRequestId) {
-        renderPage();
+        if (!_renderPageTimer) {
+            _renderPageTimer = setTimeout(() => {
+                renderPage();
+                _renderPageTimer = null;
+            }, 200);
+        }
     } else {
         const row = document.getElementById(`req-${req.id}`);
         if (row) row.innerHTML = buildRequestRowHTML(req);
     }
-    updateFilterOptions();
+    // Debounce filter updates — streaming can fire 10-20x/sec
+    clearTimeout(_updateFilterTimer);
+    _updateFilterTimer = setTimeout(updateFilterOptions, 500);
 }
 
 function buildRequestRowHTML(req) {
@@ -232,8 +246,10 @@ function lookupProviderPrice(model) {
 function formatCost(req) {
     const price = lookupProviderPrice(req.model);
     if (!price) return '—';
-    const inCost = (req.input_tokens ?? 0) * price.in / 1_000_000;
-    const outCost = (req.output_tokens ?? 0) * price.out / 1_000_000;
+    const inTotal = req.total_input_tokens ?? req.input_tokens ?? 0;
+    const outTotal = req.total_output_tokens ?? req.output_tokens ?? 0;
+    const inCost = inTotal * price.in / 1_000_000;
+    const outCost = outTotal * price.out / 1_000_000;
     const total = inCost + outCost;
     if (total === 0) return '¥0.00';
     if (total < 0.001) return `¥${total.toFixed(5)}`;
@@ -282,7 +298,10 @@ function showDetailTab(tab, req) {
 
 function renderDetailBody(headers, body) {
     const parts = [];
-    if (headers) parts.push(`<pre class="detail-headers">${esc(headers)}</pre>`);
+    if (headers) {
+        const lines = headers.split('\n');
+        parts.push(`<details class="foldable-section"><summary>Headers (${lines.length} lines)</summary><pre class="detail-headers">${esc(headers)}</pre></details>`);
+    }
     if (body) {
         const parsed = tryParseJson(body);
         if (parsed) parts.push(`<div class="json-tree">${jsonTreeHTML(parsed, 0)}</div>`);
@@ -870,6 +889,9 @@ async function refreshSessionActions() {
 
 // ── Filters ──
 let sessionCache = {};
+let pendingSessionFetches = new Set();
+let _updateFilterTimer = null;
+let _renderPageTimer = null;
 
 function updateFilterOptions() {
     const models = new Set();
@@ -882,17 +904,44 @@ function updateFilterOptions() {
 
     const sessionsInData = new Set();
     requestRows.forEach(r => { if (r.session_id) sessionsInData.add(r.session_id); });
-    Promise.all(Array.from(sessionsInData).map(sid =>
-        fetch(`/api/session/${encodeURIComponent(sid)}`).then(r => r.json()).then(data => { sessionCache[sid] = data.session?.label || sid.substring(0, 8); }).catch(() => { sessionCache[sid] = sid.substring(0, 8); })
-    )).then(() => {
-        const sessionSelect = document.getElementById('filter-session');
-        const current = sessionSelect.value;
-        sessionSelect.innerHTML = '<option value="">All Sessions</option>';
-        sessionsInData.forEach(s => {
-            sessionSelect.innerHTML += `<option value="${esc(s)}">${esc(sessionCache[s] || s.substring(0, 8))} (${esc(s.substring(0, 8))})</option>`;
-        });
-        sessionSelect.value = current;
+
+    // Immediately render from cache + fallback (no fetch delay)
+    renderSessionSelect(sessionsInData);
+
+    // Only fetch uncached sessions that aren't already in-flight
+    const toFetch = Array.from(sessionsInData).filter(
+        sid => !sessionCache[sid] && !pendingSessionFetches.has(sid)
+    );
+    if (toFetch.length === 0) return;
+
+    toFetch.forEach(sid => pendingSessionFetches.add(sid));
+
+    // Fetch in batches of 5 to avoid flooding the server
+    (async function fetchInBatches() {
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
+            const batch = toFetch.slice(i, i + BATCH_SIZE);
+            await Promise.all(batch.map(sid =>
+                fetch(`/api/session/${encodeURIComponent(sid)}`)
+                    .then(r => r.json())
+                    .then(data => { sessionCache[sid] = data.session?.label || sid.substring(0, 8); })
+                    .catch(() => { sessionCache[sid] = sid.substring(0, 8); })
+                    .finally(() => { pendingSessionFetches.delete(sid); })
+            ));
+        }
+        renderSessionSelect(sessionsInData);
+    })();
+}
+
+function renderSessionSelect(sessionsInData) {
+    const sessionSelect = document.getElementById('filter-session');
+    const current = sessionSelect.value;
+    sessionSelect.innerHTML = '<option value="">All Sessions</option>';
+    sessionsInData.forEach(s => {
+        const label = sessionCache[s] || s.substring(0, 8);
+        sessionSelect.innerHTML += `<option value="${esc(s)}">${esc(label)} (${esc(s.substring(0, 8))})</option>`;
     });
+    sessionSelect.value = current;
 }
 
 function applyFiltersAndRender() {
@@ -933,14 +982,17 @@ function tryParseJson(str) {
     return null;
 }
 
-function jsonTreeHTML(value, depth) {
+const COLLAPSED_KEYS = new Set(['tools', 'request_headers', 'response_headers']);
+
+function jsonTreeHTML(value, depth, key) {
     if (value === null) return '<span class="jt-null">null</span>';
     if (typeof value === 'boolean') return `<span class="jt-bool">${value}</span>`;
     if (typeof value === 'number') return `<span class="jt-number">${value}</span>`;
     if (typeof value === 'string') return `<span class="jt-string">"${esc(value)}"</span>`;
+    const shouldCollapse = COLLAPSED_KEYS.has(key);
     if (Array.isArray(value)) {
         if (value.length === 0) return '<span class="jt-bracket">[]</span>';
-        const collapsed = depth >= 2;
+        const collapsed = depth >= 2 || shouldCollapse;
         const preview = `[${value.length} item${value.length > 1 ? 's' : ''}]`;
         const children = value.map((item, i) => `<div class="jt-item"><span class="jt-index">${i}: </span>${jsonTreeHTML(item, depth + 1)}</div>`).join('');
         return `<span class="jt-node jt-array"><span class="jt-toggle ${collapsed ? '' : 'expanded'}">${collapsed ? '+' : '-'}</span><span class="jt-bracket">[</span><span class="jt-preview ${collapsed ? '' : 'hidden'}">${esc(preview)}</span><span class="jt-children ${collapsed ? 'hidden' : ''}">${children}</span><span class="jt-bracket">]</span></span>`;
@@ -948,7 +1000,7 @@ function jsonTreeHTML(value, depth) {
     if (typeof value === 'object') {
         const keys = Object.keys(value);
         if (keys.length === 0) return '<span class="jt-bracket">{}</span>';
-        const collapsed = depth >= 2;
+        const collapsed = depth >= 2 || shouldCollapse;
         const previewParts = IMPORTANT_KEYS.filter(k => k in value).map(k => {
             const v = value[k];
             if (typeof v === 'string') return `${k}: "${esc(truncate(v, 40))}"`;
@@ -957,9 +1009,97 @@ function jsonTreeHTML(value, depth) {
             if (v === null) return `${k}: null`;
             return `${k}: {...}`;
         });
+        // For message objects, show a snippet of the last meaningful content
+        if (value.role !== undefined) {
+            // Case 1: content is a plain string (e.g. user message)
+            if (typeof value.content === 'string' && value.content.trim()) {
+                const clean = value.content.replace(/\s+/g, ' ').trim();
+                previewParts.push(`"${esc(truncate(clean, 80))}"`);
+            }
+            // Case 2: content is an array of blocks (e.g. assistant message)
+            else if (Array.isArray(value.content) && value.content.length > 0) {
+            const lastBlock = value.content[value.content.length - 1];
+            const lastText = lastBlock && (
+                (typeof lastBlock.text === 'string' && lastBlock.text.trim()) ||
+                (typeof lastBlock.content === 'string' && lastBlock.content.trim())
+            );
+
+            if (lastText) {
+                // Last block has text or content (e.g. tool_result) — show it directly
+                const text = (typeof lastBlock.text === 'string' && lastBlock.text.trim())
+                    || (typeof lastBlock.content === 'string' && lastBlock.content.trim());
+                const clean = text.replace(/\s+/g, ' ').trim();
+                previewParts.push(`"${esc(truncate(clean, 80))}"`);
+            } else if (lastBlock) {
+                // Last block is not text (tool_use / thinking / etc.) — show action label first
+                const actionLabel = typeof lastBlock.name === 'string' ? `[tool:${lastBlock.name}]`
+                    : typeof lastBlock.type === 'string' ? `[${lastBlock.type}]`
+                    : null;
+                if (actionLabel) previewParts.push(actionLabel);
+
+                // Then look backwards for context: text → content → tool_use → thinking
+                let textTarget = null;
+                // 1. Prefer text blocks
+                for (let i = value.content.length - 2; i >= 0; i--) {
+                    const b = value.content[i];
+                    if (b && typeof b.text === 'string' && b.text.trim()) {
+                        textTarget = b;
+                        break;
+                    }
+                }
+                // 2. Fallback: blocks with "content" field (e.g. tool_result)
+                if (!textTarget) {
+                    for (let i = value.content.length - 2; i >= 0; i--) {
+                        const b = value.content[i];
+                        if (b && typeof b.content === 'string' && b.content.trim()) {
+                            textTarget = b;
+                            break;
+                        }
+                    }
+                }
+                // 3. Fallback: tool_use blocks — show parameters
+                if (!textTarget) {
+                    for (let i = value.content.length - 2; i >= 0; i--) {
+                        const b = value.content[i];
+                        if (b && b.type === 'tool_use' && b.input && typeof b.input === 'object') {
+                            textTarget = b;
+                            break;
+                        }
+                    }
+                }
+                // 4. Last resort: thinking blocks
+                if (!textTarget) {
+                    for (let i = value.content.length - 2; i >= 0; i--) {
+                        const b = value.content[i];
+                        if (b && typeof b.thinking === 'string' && b.thinking.trim()) {
+                            textTarget = b;
+                            break;
+                        }
+                    }
+                }
+
+                if (textTarget) {
+                    let snippet;
+                    if (typeof textTarget.text === 'string') {
+                        snippet = textTarget.text.trim();
+                    } else if (typeof textTarget.content === 'string') {
+                        snippet = textTarget.content.trim();
+                    } else if (textTarget.type === 'tool_use' && textTarget.input) {
+                        snippet = JSON.stringify(textTarget.input);
+                    } else if (typeof textTarget.thinking === 'string') {
+                        snippet = textTarget.thinking.trim();
+                    }
+                    if (snippet) {
+                        const clean = snippet.replace(/\s+/g, ' ').trim();
+                        previewParts.push(`"${esc(truncate(clean, 80))}"`);
+                    }
+                }
+            }
+        }
+    }
         const remaining = keys.filter(k => !IMPORTANT_KEYS.includes(k)).length;
         const preview = previewParts.length > 0 ? previewParts.join(', ') + (remaining > 0 ? ` +${remaining}` : '') : `${keys.length} key${keys.length > 1 ? 's' : ''}`;
-        const children = keys.map(k => `<div class="jt-pair"><span class="jt-key">"${esc(k)}": </span>${jsonTreeHTML(value[k], depth + 1)}</div>`).join('');
+        const children = keys.map(k => `<div class="jt-pair"><span class="jt-key">"${esc(k)}": </span>${jsonTreeHTML(value[k], depth + 1, k)}</div>`).join('');
         return `<span class="jt-node jt-object"><span class="jt-toggle ${collapsed ? '' : 'expanded'}">${collapsed ? '+' : '-'}</span><span class="jt-bracket">{</span><span class="jt-preview ${collapsed ? '' : 'hidden'}">${preview}</span><span class="jt-children ${collapsed ? 'hidden' : ''}">${children}</span><span class="jt-bracket">}</span></span>`;
     }
     return String(value);
@@ -1074,12 +1214,39 @@ function clearAllTables() {
     refreshSessionActions();
 }
 
+// ── Silent check ──
+function startSilentCheck() {
+    clearInterval(_silentTimer);
+    _silentTimer = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - _lastMsgTime) / 1000);
+        const el = document.getElementById('connection-status');
+        if (elapsed > 180) {
+            el.textContent = `Connected (silent ${elapsed}s)`;
+            el.className = 'connected silent';
+            if (elapsed % 30 === 0) {
+                console.warn(`[ws] silent for ${elapsed}s — no messages received`);
+            }
+        } else {
+            el.textContent = 'Connected';
+            el.className = 'connected';
+        }
+    }, 5000);
+}
+
 // ── Init ──
 connect();
 
 fetch('/api/upstreams')
     .then(r => r.json())
     .then(data => applyUpstreamState(data.active_upstream, data.upstreams, data.providers));
+
+// Pre-fill session cache in one call to avoid N individual fetches
+fetch('/api/sessions')
+    .then(r => r.json())
+    .then(sessions => {
+        sessions.forEach(s => { sessionCache[s.id] = s.label || s.id.substring(0, 8); });
+    })
+    .catch(() => {});
 
 fetch('/api/requests?limit=2000')
     .then(r => r.json())
@@ -1088,7 +1255,9 @@ fetch('/api/requests?limit=2000')
             requestRows.clear();
             requests.forEach(req => requestRows.set(req.id, req));
             currentPage = 1;
-            renderPage(); updateFilterOptions(); updateRequestCount();
+            renderPage(); updateRequestCount();
+            // updateFilterOptions will find sessions already cached from /api/sessions
+            updateFilterOptions();
         }
     })
     .catch(err => console.error('Failed to load requests:', err));
@@ -1100,3 +1269,51 @@ fetch('/api/mcp-destination')
 fetch('/api/capture/status')
     .then(r => r.json())
     .then(data => { captureEnabled = data.enabled; updateCaptureButton(); });
+
+fetch('/api/retention')
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById('ret-hours').value = data.request_retention_hours;
+        document.getElementById('ret-max-sessions').value = data.session_max_count;
+    })
+    .catch(() => {});
+
+// ── Retention panel ──
+document.getElementById('btn-retention-save').addEventListener('click', async () => {
+    const body = {
+        request_retention_hours: parseInt(document.getElementById('ret-hours').value) || 0,
+        session_max_count: parseInt(document.getElementById('ret-max-sessions').value) || 0,
+    };
+    const resp = await fetch('/api/retention', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    if (resp.ok) {
+        const result = document.getElementById('ret-cleanup-result');
+        result.className = 'cleanup-result success';
+        result.textContent = 'Saved';
+        result.classList.remove('hidden');
+        setTimeout(() => result.classList.add('hidden'), 2000);
+    }
+});
+
+document.getElementById('btn-cleanup-now').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-cleanup-now');
+    btn.disabled = true;
+    btn.textContent = 'Cleaning...';
+    try {
+        const resp = await fetch('/api/cleanup', { method: 'POST' });
+        const data = await resp.json();
+        const result = document.getElementById('ret-cleanup-result');
+        result.className = 'cleanup-result success';
+        result.textContent = `Cleaned: ${data.deleted_requests} requests, ${data.deleted_sessions} sessions`;
+        result.classList.remove('hidden');
+        document.getElementById('ret-last-cleanup').textContent = new Date().toLocaleTimeString();
+    } catch (e) {
+        const result = document.getElementById('ret-cleanup-result');
+        result.className = 'cleanup-result';
+        result.textContent = 'Failed to clean up';
+        result.classList.remove('hidden');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Clean Up Now';
+});
