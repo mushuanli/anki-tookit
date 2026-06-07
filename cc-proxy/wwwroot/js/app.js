@@ -21,6 +21,10 @@ let filterTimeTo = '';
 // ── Selection state ──
 const selectedIds = new Set();
 
+// ── Session folding state ──
+const expandedSessions = new Set();  // session IDs currently expanded
+let sessionFoldEnabled = true;  // global toggle for session folding
+
 // ── Provider / upstream state ──
 let providerList = [];  // ProviderInfo[]
 let upstreamList = [];  // UpstreamInfo[]
@@ -145,30 +149,166 @@ function getFilteredRequests() {
     return result;
 }
 
-function renderPage() {
+function formatCostNum(req) {
+    const price = lookupProviderPrice(req.model);
+    if (!price) return 0;
+    const inTotal = req.total_input_tokens ?? req.input_tokens ?? 0;
+    const outTotal = req.total_output_tokens ?? req.output_tokens ?? 0;
+    return inTotal * price.in / 1_000_000 + outTotal * price.out / 1_000_000;
+}
+
+function getSessionGroups() {
     const filtered = getFilteredRequests();
-    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const groupsMap = new Map();
+    for (const req of filtered) {
+        const sid = req.session_id || '__no_session__';
+        if (!groupsMap.has(sid)) {
+            groupsMap.set(sid, {
+                session_id: sid,
+                label: sessionCache[sid] || sid.substring(0, 8),
+                requests: [],
+                totalIn: 0,
+                totalOut: 0,
+                totalCost: 0,
+                firstTime: req.timestamp,
+                lastTime: req.timestamp,
+                models: new Set(),
+            });
+        }
+        const g = groupsMap.get(sid);
+        g.requests.push(req);
+        if (req.model) g.models.add(req.model);
+        if (new Date(req.timestamp) < new Date(g.firstTime)) g.firstTime = req.timestamp;
+        if (new Date(req.timestamp) > new Date(g.lastTime)) g.lastTime = req.timestamp;
+    }
+    const result = Array.from(groupsMap.values());
+    result.forEach(g => {
+        g.requests.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        // The request with the largest timestamp carries cumulative total_* token counts,
+        // so we take its values as the session-level totals rather than summing across requests.
+        const latest = g.requests[0];
+        g.totalIn = latest.total_input_tokens || 0;
+        g.totalOut = latest.total_output_tokens || 0;
+        g.totalCost = formatCostNum(latest);
+        g.models = Array.from(g.models);
+    });
+    result.sort((a, b) => new Date(b.lastTime) - new Date(a.lastTime));
+    return result;
+}
+
+function buildSessionHeaderHTML(group, isExpanded) {
+    const reqCount = group.requests.length;
+    const timeRange = formatTime(group.lastTime);
+    const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${group.totalIn}/${group.totalOut}` : '—';
+    const cost = group.totalCost > 0 ? `¥${group.totalCost.toFixed(4)}` : '—';
+    const models = group.models.join(', ');
+    return `<td colspan="13">
+        <div class="session-header-inner">
+            <span class="session-expand-icon${isExpanded ? ' expanded' : ''}">▶</span>
+            <span class="session-label">${esc(group.label)}</span>
+            <span class="session-summary">
+                <span class="session-summary-item">${reqCount} req${reqCount > 1 ? 's' : ''}</span>
+                ${models ? `<span class="session-summary-item">${esc(models)}</span>` : ''}
+                <span class="session-summary-item">${timeRange}</span>
+                <span class="session-summary-item">${tokens}t</span>
+                <span class="session-summary-item cost">${cost}</span>
+            </span>
+        </div>
+    </td>`;
+}
+
+function toggleSession(sessionId) {
+    if (expandedSessions.has(sessionId)) {
+        expandedSessions.delete(sessionId);
+    } else {
+        expandedSessions.add(sessionId);
+    }
+    renderPage();
+}
+
+function expandAllSessions() {
+    const groups = getSessionGroups();
+    groups.forEach(g => expandedSessions.add(g.session_id));
+    renderPage();
+}
+
+function collapseAllSessions() {
+    expandedSessions.clear();
+    renderPage();
+}
+
+function renderPage() {
+    const groups = getSessionGroups();
+    const totalPages = Math.max(1, Math.ceil(groups.length / pageSize));
     if (currentPage > totalPages) currentPage = totalPages;
     const start = (currentPage - 1) * pageSize;
     const tbody = document.getElementById('requests-tbody');
     tbody.innerHTML = '';
-    filtered.slice(start, start + pageSize).forEach(req => {
-        const tr = document.createElement('tr');
-        tr.id = `req-${req.id}`;
-        tr.innerHTML = buildRequestRowHTML(req);
-        tr.addEventListener('click', () => showRequestDetail(req));
-        tbody.appendChild(tr);
+
+    const pageGroups = groups.slice(start, start + pageSize);
+    pageGroups.forEach((group, idx) => {
+        // Requests without a session ID are rendered as plain rows (no folding)
+        if (group.session_id === '__no_session__') {
+            group.requests.forEach(req => {
+                const tr = document.createElement('tr');
+                tr.id = `req-${req.id}`;
+                tr.innerHTML = buildRequestRowHTML(req);
+                tr.addEventListener('click', (e) => {
+                    if (e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
+                    showRequestDetail(req);
+                });
+                tbody.appendChild(tr);
+            });
+        } else {
+            const isExpanded = expandedSessions.has(group.session_id);
+
+            // Session header row
+            const headerTr = document.createElement('tr');
+            headerTr.className = 'session-header';
+            headerTr.dataset.session = group.session_id;
+            headerTr.innerHTML = buildSessionHeaderHTML(group, isExpanded);
+            headerTr.addEventListener('click', (e) => {
+                if (e.target.closest('.row-chk')) return;
+                toggleSession(group.session_id);
+            });
+            tbody.appendChild(headerTr);
+
+            // Child request rows
+            group.requests.forEach(req => {
+                const tr = document.createElement('tr');
+                tr.id = `req-${req.id}`;
+                tr.className = 'session-child' + (isExpanded ? '' : ' collapsed');
+                tr.dataset.session = group.session_id;
+                tr.innerHTML = buildRequestRowHTML(req);
+                tr.addEventListener('click', (e) => {
+                    if (e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
+                    showRequestDetail(req);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        // Spacer between groups
+        if (idx < pageGroups.length - 1) {
+            const spacerTr = document.createElement('tr');
+            spacerTr.className = 'session-group-spacer';
+            spacerTr.innerHTML = '<td colspan="13"></td>';
+            tbody.appendChild(spacerTr);
+        }
     });
+
+    // Highlight selected row
     if (selectedRequestId) {
         const row = document.getElementById(`req-${selectedRequestId}`);
         if (row) row.classList.add('selected');
     }
-    updatePagination(filtered.length, totalPages);
+
+    updatePagination(groups.length, totalPages);
     updateSelectionUI();
 }
 
 function updatePagination(total, totalPages) {
-    document.getElementById('page-info').textContent = `${total} requests`;
+    document.getElementById('page-info').textContent = `${total} sessions · ${requestRows.size} requests`;
     document.getElementById('page-num').textContent = `Page ${currentPage} / ${totalPages}`;
     document.getElementById('btn-page-prev').disabled = currentPage <= 1;
     document.getElementById('btn-page-next').disabled = currentPage >= totalPages;
@@ -177,7 +317,8 @@ function updatePagination(total, totalPages) {
 function upsertRequestRow(req) {
     const isNew = !requestRows.has(req.id);
     requestRows.set(req.id, req);
-    if (isNew || req.id === selectedRequestId) {
+    // Always re-render when session folding is on — new requests may affect group layout
+    if (isNew || req.id === selectedRequestId || sessionFoldEnabled) {
         if (!_renderPageTimer) {
             _renderPageTimer = setTimeout(() => {
                 renderPage();
@@ -260,16 +401,20 @@ function formatCost(req) {
 
 function showRequestDetail(req) {
     selectedRequestId = req.id;
+    // Auto-expand the session containing this request
+    if (req.session_id) expandedSessions.add(req.session_id);
+
     const content = document.getElementById('detail-content');
     delete content.dataset.streamStarted;
     document.getElementById('request-detail').classList.remove('hidden');
     document.getElementById('view-inspector').classList.add('detail-open');
     document.getElementById('detail-title').textContent = `${req.method} ${req.path}`;
 
-    const filtered = getFilteredRequests();
-    const idx = filtered.findIndex(r => r.id === req.id);
-    if (idx >= 0) {
-        const targetPage = Math.floor(idx / pageSize) + 1;
+    // Find page containing this request's session group
+    const groups = getSessionGroups();
+    const groupIdx = groups.findIndex(g => g.session_id === (req.session_id || '__no_session__'));
+    if (groupIdx >= 0) {
+        const targetPage = Math.floor(groupIdx / pageSize) + 1;
         if (targetPage !== currentPage) currentPage = targetPage;
     }
     renderPage();
@@ -837,6 +982,10 @@ document.getElementById('btn-set-mcp').addEventListener('click', async () => {
 document.getElementById('btn-clear-mcp-view').addEventListener('click', () => fetch('/api/clear-mcp', { method: 'POST' }));
 document.getElementById('btn-clear-hooks').addEventListener('click', () => fetch('/api/clear', { method: 'POST' }));
 
+// ── Session expand/collapse all ──
+document.getElementById('btn-expand-all').addEventListener('click', expandAllSessions);
+document.getElementById('btn-collapse-all').addEventListener('click', collapseAllSessions);
+
 // ── Capture ──
 document.getElementById('btn-toggle-capture').addEventListener('click', async () => {
     captureEnabled = !captureEnabled;
@@ -950,14 +1099,27 @@ function applyFiltersAndRender() {
 }
 
 document.getElementById('filter-model').addEventListener('change', () => { filterModel = document.getElementById('filter-model').value; applyFiltersAndRender(); });
-document.getElementById('filter-session').addEventListener('change', () => { filterSession = document.getElementById('filter-session').value; refreshSessionActions(); applyFiltersAndRender(); });
+document.getElementById('filter-session').addEventListener('change', () => {
+    filterSession = document.getElementById('filter-session').value;
+    expandedSessions.clear();
+    if (filterSession) {
+        // Auto-expand the selected session
+        expandedSessions.add(filterSession);
+    } else {
+        // "All Sessions" — expand latest only
+        const groups = getSessionGroups();
+        if (groups.length > 0) expandedSessions.add(groups[0].session_id);
+    }
+    refreshSessionActions();
+    applyFiltersAndRender();
+});
 document.getElementById('filter-time-from').addEventListener('change', () => { filterTimeFrom = document.getElementById('filter-time-from').value; if (filterTimeFrom) filterTimeFrom += ':00'; applyFiltersAndRender(); });
 document.getElementById('filter-time-to').addEventListener('change', () => { filterTimeTo = document.getElementById('filter-time-to').value; if (filterTimeTo) filterTimeTo += ':00'; applyFiltersAndRender(); });
 
 // ── Pagination ──
 document.getElementById('page-size').addEventListener('change', () => { pageSize = parseInt(document.getElementById('page-size').value); currentPage = 1; renderPage(); });
 document.getElementById('btn-page-prev').addEventListener('click', () => { if (currentPage > 1) { currentPage--; renderPage(); } });
-document.getElementById('btn-page-next').addEventListener('click', () => { const tp = Math.max(1, Math.ceil(getFilteredRequests().length / pageSize)); if (currentPage < tp) { currentPage++; renderPage(); } });
+document.getElementById('btn-page-next').addEventListener('click', () => { const tp = Math.max(1, Math.ceil(getSessionGroups().length / pageSize)); if (currentPage < tp) { currentPage++; renderPage(); } });
 
 // ── Utilities ──
 function formatTime(ts) {
@@ -1201,6 +1363,7 @@ function updateSelectionUI() {
 
 function clearAllTables() {
     requestRows.clear();
+    expandedSessions.clear();
     currentPage = 1;
     filterModel = ''; filterSession = ''; filterTimeFrom = ''; filterTimeTo = '';
     document.getElementById('filter-model').value = '';
@@ -1254,6 +1417,9 @@ fetch('/api/requests?limit=2000')
         if (requests.length > 0) {
             requestRows.clear();
             requests.forEach(req => requestRows.set(req.id, req));
+            // Expand latest session only on initial load
+            const groups = getSessionGroups();
+            if (groups.length > 0) expandedSessions.add(groups[0].session_id);
             currentPage = 1;
             renderPage(); updateRequestCount();
             // updateFilterOptions will find sessions already cached from /api/sessions
