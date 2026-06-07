@@ -140,6 +140,11 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub active_upstream: String,
 
+    /// Effort level override injected into proxied requests.
+    /// "auto" means pass through the original value unchanged.
+    #[serde(default = "default_effort")]
+    pub active_effort: String,
+
     /// Provider definitions (URL, token, models).
     #[serde(default)]
     pub providers: Vec<Provider>,
@@ -210,6 +215,7 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
 }
 
+fn default_effort() -> String { "auto".into() }
 fn default_retry_count() -> u32 { 3 }
 fn default_request_capacity() -> usize { 1000 }
 fn default_mcp_capacity() -> usize { 500 }
@@ -227,6 +233,7 @@ impl Default for AppConfig {
         Self {
             proxy: ProxyConfig {
                 active_upstream: String::new(),
+                active_effort: default_effort(),
                 providers: Vec::new(),
                 upstreams: Vec::new(),
                 retry_count: default_retry_count(),

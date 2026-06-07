@@ -78,6 +78,22 @@ td.status-5xx { color: var(--error); }
 .btn-delete-row { background: transparent; border: none; color: var(--text-muted); font-size: 1rem; padding: 0 4px; cursor: pointer; border-radius: 3px; line-height: 1; }
 .btn-delete-row:hover { background: var(--error); color: white; }
 
+/* ── Session folding ── */
+.session-header { background: var(--bg-card); cursor: pointer; user-select: none; }
+.session-header:hover { background: #1a3a6a; }
+.session-header td { padding: 5px 10px; }
+.session-header-inner { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; flex-wrap: wrap; }
+.session-expand-icon { display: inline-block; width: 14px; font-size: 0.6rem; color: var(--text-muted); transition: transform 0.15s; flex-shrink: 0; }
+.session-expand-icon.expanded { transform: rotate(90deg); }
+.session-label { font-weight: 600; color: var(--text); }
+.session-summary { color: var(--text-muted); font-size: 0.72rem; display: flex; gap: 8px; flex-wrap: wrap; }
+.session-summary-item { white-space: nowrap; }
+.session-summary-item.cost { color: var(--warning); }
+.session-child { }
+.session-child.collapsed { display: none; }
+.session-child td { padding-left: 22px; }
+.session-group-spacer td { padding: 0; height: 4px; background: var(--bg); border: none; }
+
 /* ── Pagination ── */
 .pagination { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 0; font-size: 0.8rem; color: var(--text-muted); }
 .pagination select { background: var(--bg-panel); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; border-radius: 4px; font-size: 0.78rem; }
@@ -220,6 +236,22 @@ td.col-cost { color: var(--warning); font-family: var(--font-mono); font-size: 0
 }
 .cleanup-result { margin-top: 8px; padding: 8px 10px; border-radius: 5px; font-size: 0.78rem; background: var(--bg-panel); border: 1px solid var(--border); }
 .cleanup-result.success { border-color: var(--success); color: var(--success); }
+
+/* ── Cost view ── */
+.cost-cards { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.cost-card {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 20px; min-width: 140px; flex: 1;
+}
+.cost-card-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
+.cost-card-value { font-size: 1.3rem; font-weight: 700; font-family: var(--font-mono); color: var(--text); }
+.cost-detail-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+.cost-panel { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.cost-panel h3 { padding: 10px 14px; font-size: 0.85rem; background: var(--bg-card); border-bottom: 1px solid var(--border); margin: 0; }
+.cost-panel table { font-size: 0.78rem; width: 100%; }
+.btn-cost-preset { padding: 3px 10px; font-size: 0.78rem; }
+.btn-cost-preset.active { background: var(--accent2); border-color: var(--accent2); color: white; }
+#effort-select { font-size: 0.8rem; }
 
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 

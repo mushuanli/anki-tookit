@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 
-use crate::models::{HookEvent, ProxiedRequest, Session, SessionStatus, SseEvent};
+use crate::models::{CostData, HookEvent, ModelCost, ProxiedRequest, Session, SessionCost, SessionStatus, SseEvent};
 
 /// Thin wrapper around a SQLite connection, providing typed CRUD operations
 /// for sessions, requests, SSE events, hooks, and MCP requests.
@@ -378,6 +378,86 @@ impl Database {
             params![session_id],
             |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
         )
+    }
+
+    /// Aggregate cost data over a time range for the Cost view.
+    /// Uses per-request tokens (not cumulative total_*) to avoid double-counting.
+    pub fn get_cost_data(&self, from: &str, to: &str) -> Result<CostData, rusqlite::Error> {
+        let by_model = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(model, 'unknown'),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_creation_input_tokens), 0),
+                        COUNT(*) as request_count
+                 FROM requests
+                 WHERE timestamp >= ?1 AND timestamp < ?2 AND status_code IS NOT NULL
+                 GROUP BY model
+                 ORDER BY request_count DESC",
+            )?;
+            let rows = stmt.query_map(params![from, to], |row| {
+                Ok(ModelCost {
+                    model: row.get(0)?,
+                    input_tokens: row.get::<_, i64>(1)? as u64,
+                    output_tokens: row.get::<_, i64>(2)? as u64,
+                    cache_creation_tokens: row.get::<_, i64>(3)? as u64,
+                    request_count: row.get::<_, i64>(4)? as u64,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+            rows
+        };
+
+        let by_session = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT r.session_id,
+                        COALESCE(s.label, SUBSTR(r.session_id, 1, 8)) as session_label,
+                        COALESCE(SUM(r.input_tokens), 0),
+                        COALESCE(SUM(r.output_tokens), 0),
+                        COUNT(*) as request_count,
+                        MIN(r.timestamp) as first_request,
+                        MAX(r.timestamp) as last_request,
+                        GROUP_CONCAT(DISTINCT COALESCE(r.model, 'unknown')) as models_csv
+                 FROM requests r
+                 LEFT JOIN sessions s ON r.session_id = s.id
+                 WHERE r.timestamp >= ?1 AND r.timestamp < ?2
+                   AND r.status_code IS NOT NULL AND r.session_id IS NOT NULL
+                 GROUP BY r.session_id
+                 ORDER BY request_count DESC",
+            )?;
+            let rows = stmt.query_map(params![from, to], |row| {
+                let models_csv: Option<String> = row.get(7)?;
+                let models = models_csv
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                Ok(SessionCost {
+                    session_id: row.get(0)?,
+                    session_label: row.get(1)?,
+                    input_tokens: row.get::<_, i64>(2)? as u64,
+                    output_tokens: row.get::<_, i64>(3)? as u64,
+                    request_count: row.get::<_, i64>(4)? as u64,
+                    first_request: row.get(5)?,
+                    last_request: row.get(6)?,
+                    models,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+            rows
+        };
+
+        Ok(CostData {
+            from: from.to_string(),
+            to: to.to_string(),
+            by_model,
+            by_session,
+        })
     }
 
     pub fn clear_requests(&self) -> Result<(), rusqlite::Error> {

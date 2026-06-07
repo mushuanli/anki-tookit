@@ -212,6 +212,7 @@ pub enum WsMessage {
         active_upstream: String,
         upstreams: Vec<UpstreamInfo>,
         providers: Vec<ProviderInfo>,
+        active_effort: String,
     },
     History { requests: Vec<ProxiedRequest> },
     HookHistory { events: Vec<HookEvent> },
@@ -220,4 +221,35 @@ pub enum WsMessage {
     SessionStopped(Session),
     SessionUpdated { request_id: String },
     TeeStatusChanged { enabled: bool },
+}
+
+// ── Cost aggregation data structures ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCost {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub request_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCost {
+    pub session_id: String,
+    pub session_label: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub request_count: u64,
+    pub first_request: String,
+    pub last_request: String,
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostData {
+    pub from: String,
+    pub to: String,
+    pub by_model: Vec<ModelCost>,
+    pub by_session: Vec<SessionCost>,
 }

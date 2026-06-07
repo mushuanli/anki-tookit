@@ -120,6 +120,40 @@ async fn resolve_routing(
     ))
 }
 
+/// Inject `output_config.effort` into request body JSON (field-level merge).
+/// Also appends the effort beta header if not already present.
+/// Returns original bytes unchanged when effort is "auto" or body is not valid JSON.
+fn inject_effort_into_body(body_bytes: Bytes, effort: &str, headers: &mut HeaderMap) -> Bytes {
+    if effort == "auto" {
+        return body_bytes;
+    }
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) else {
+        return body_bytes;
+    };
+    // Merge only the effort field; preserve any other output_config fields.
+    if let Some(oc) = json.get_mut("output_config").and_then(|v| v.as_object_mut()) {
+        oc.insert("effort".into(), serde_json::Value::String(effort.to_string()));
+    } else {
+        json["output_config"] = serde_json::json!({"effort": effort});
+    }
+    // Append the effort beta header without clobbering existing values.
+    const BETA: &str = "effort-2025-11-24";
+    if let Some(existing) = headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) {
+        if !existing.contains(BETA) {
+            let new_val = format!("{},{}", existing, BETA);
+            if let Ok(hv) = HeaderValue::from_str(&new_val) {
+                headers.insert("anthropic-beta", hv);
+            }
+        }
+    } else {
+        headers.insert("anthropic-beta", HeaderValue::from_static("effort-2025-11-24"));
+    }
+    match serde_json::to_vec(&json) {
+        Ok(new_bytes) => Bytes::from(new_bytes),
+        Err(_) => body_bytes,
+    }
+}
+
 /// Rewrite the `model` field in the JSON body if the target model differs.
 /// Updates `captured` fields accordingly.
 fn translate_model_in_body(
@@ -294,10 +328,14 @@ async fn handle_forward_proxy(
         None => (None, body_bytes),
     };
 
+    let effort = state.active_effort.read().await.clone();
+    let mut upstream_headers = build_upstream_headers(&headers, override_token.as_deref());
+    let body_bytes = inject_effort_into_body(body_bytes, &effort, &mut upstream_headers);
+
     let upstream_req = match state
         .client
         .request(method.clone(), &upstream_url)
-        .headers(build_upstream_headers(&headers, override_token.as_deref()))
+        .headers(upstream_headers)
         .body(body_bytes)
         .build()
     {
@@ -375,10 +413,14 @@ async fn handle_reverse_proxy(
 
     let upstream_url = format!("{}{}", provider_base, uri.path());
 
+    let effort = state.active_effort.read().await.clone();
+    let mut upstream_headers = build_upstream_headers(&headers, provider_token.as_deref());
+    let body_bytes = inject_effort_into_body(body_bytes, &effort, &mut upstream_headers);
+
     let upstream_req = match state
         .client
         .request(method.clone(), &upstream_url)
-        .headers(build_upstream_headers(&headers, provider_token.as_deref()))
+        .headers(upstream_headers)
         .body(body_bytes)
         .build()
     {

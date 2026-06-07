@@ -29,6 +29,8 @@ let sessionFoldEnabled = true;  // global toggle for session folding
 let providerList = [];  // ProviderInfo[]
 let upstreamList = [];  // UpstreamInfo[]
 let activeUpstream = '';
+let activeEffort = 'auto';
+const EFFORT_LEVELS = ['auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
 
 function connect() {
     ws = new WebSocket(`${protocol}//${location.host}/ws`);
@@ -112,7 +114,7 @@ function handleMessage(msg) {
             if (msg.payload.destination_url) document.getElementById('mcp-destination').value = msg.payload.destination_url;
             break;
         case 'UpstreamChanged':
-            applyUpstreamState(msg.payload.active_upstream, msg.payload.upstreams, msg.payload.providers);
+            applyUpstreamState(msg.payload.active_upstream, msg.payload.upstreams, msg.payload.providers, msg.payload.active_effort);
             break;
         case 'TeeStatusChanged':
             captureEnabled = msg.payload.enabled;
@@ -130,6 +132,12 @@ document.querySelectorAll('nav a').forEach(link => {
         link.classList.add('active');
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         document.getElementById(`view-${view}`).classList.add('active');
+        if (view === 'cost' && !document.getElementById('cost-from').value) {
+            const { from, to } = COST_PRESETS.today();
+            document.getElementById('cost-from').value = from;
+            document.getElementById('cost-to').value = to;
+            loadCosts();
+        }
     });
 });
 
@@ -653,6 +661,30 @@ document.getElementById('upstream-select').addEventListener('change', async () =
     await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
 });
 
+// ── Effort select (Inspector toolbar) ──
+
+function populateEffortSelect(active) {
+    const select = document.getElementById('effort-select');
+    select.innerHTML = '';
+    EFFORT_LEVELS.forEach(level => {
+        const opt = document.createElement('option');
+        opt.value = level;
+        opt.textContent = level === 'auto' ? 'auto (passthrough)' : level;
+        if (level === active) opt.selected = true;
+        select.appendChild(opt);
+    });
+}
+
+document.getElementById('effort-select').addEventListener('change', async () => {
+    const effort = document.getElementById('effort-select').value;
+    if (!effort) return;
+    await fetch('/api/effort', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ effort }),
+    });
+});
+
 function populateUpstreamSelect(upstreams, active) {
     const select = document.getElementById('upstream-select');
     select.innerHTML = '';
@@ -671,11 +703,13 @@ function populateUpstreamSelect(upstreams, active) {
 
 // ── Settings: shared state update ──
 
-function applyUpstreamState(active, upstreams, providers) {
+function applyUpstreamState(active, upstreams, providers, effort) {
     activeUpstream = active;
     upstreamList = upstreams || [];
     providerList = providers || [];
+    if (effort !== undefined) { activeEffort = effort; }
     populateUpstreamSelect(upstreams, active);
+    populateEffortSelect(activeEffort);
     renderProviderList();
     renderUpstreamList();
     refreshProviderSelects();
@@ -1401,7 +1435,7 @@ connect();
 
 fetch('/api/upstreams')
     .then(r => r.json())
-    .then(data => applyUpstreamState(data.active_upstream, data.upstreams, data.providers));
+    .then(data => applyUpstreamState(data.active_upstream, data.upstreams, data.providers, data.active_effort));
 
 // Pre-fill session cache in one call to avoid N individual fetches
 fetch('/api/sessions')
@@ -1483,3 +1517,176 @@ document.getElementById('btn-cleanup-now').addEventListener('click', async () =>
     btn.disabled = false;
     btn.textContent = 'Clean Up Now';
 });
+
+// ── Cost view ──
+
+const COST_PRESETS = {
+    today: () => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        const from = d.toISOString().slice(0, 10);
+        const to = new Date(d.getTime() + 86400000).toISOString().slice(0, 10);
+        return { from, to };
+    },
+    week: () => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        const start = new Date(d);
+        start.setDate(d.getDate() - d.getDay());
+        const end = new Date(start);
+        end.setDate(start.getDate() + 7);
+        return { from: start.toISOString().slice(0, 10), to: end.toISOString().slice(0, 10) };
+    },
+    month: () => {
+        const d = new Date();
+        const from = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+        const nextMonth = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+        return { from, to: nextMonth.toISOString().slice(0, 10) };
+    },
+};
+
+function findProviderForModel(model) {
+    if (!model) return null;
+    for (const p of providerList) {
+        if (p.models && p.models.some(m => m.id === model)) return p;
+    }
+    return null;
+}
+
+function calcModelCosts(byModel) {
+    return byModel.map(m => {
+        const price = lookupProviderPrice(m.model);
+        const cost = m.input_tokens * (price ? price.in : 5) / 1e6
+                   + m.output_tokens * (price ? price.out : 25) / 1e6;
+        return Object.assign({}, m, { cost });
+    });
+}
+
+function groupByProvider(modelCosts) {
+    const map = {};
+    modelCosts.forEach(m => {
+        const p = findProviderForModel(m.model);
+        const name = p ? p.name : 'Unknown';
+        if (!map[name]) map[name] = { provider: name, cost: 0, input_tokens: 0, output_tokens: 0 };
+        map[name].cost += m.cost;
+        map[name].input_tokens += m.input_tokens;
+        map[name].output_tokens += m.output_tokens;
+    });
+    return Object.values(map).sort((a, b) => b.cost - a.cost);
+}
+
+function formatCostValue(v) {
+    return `¥${v.toFixed(4)}`;
+}
+
+function formatTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return Math.round(n / 1e3) + 'K';
+    return String(n);
+}
+
+async function loadCosts() {
+    const from = document.getElementById('cost-from').value;
+    const to = document.getElementById('cost-to').value;
+    if (!from || !to) return;
+    document.getElementById('cost-loading').classList.remove('hidden');
+    try {
+        const resp = await fetch(`/api/costs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+        const data = await resp.json();
+        renderCostView(data);
+    } catch (e) {
+        console.error('Failed to load costs:', e);
+    }
+    document.getElementById('cost-loading').classList.add('hidden');
+}
+
+function renderCostView(data) {
+    const byModel = calcModelCosts(data.by_model || []);
+    const totalCost = byModel.reduce((s, m) => s + m.cost, 0);
+    const totalIn = byModel.reduce((s, m) => s + m.input_tokens, 0);
+    const totalOut = byModel.reduce((s, m) => s + m.output_tokens, 0);
+    const totalReqs = byModel.reduce((s, m) => s + m.request_count, 0);
+
+    document.getElementById('cost-total').textContent = formatCostValue(totalCost);
+    document.getElementById('cost-input-tokens').textContent = formatTokens(totalIn);
+    document.getElementById('cost-output-tokens').textContent = formatTokens(totalOut);
+    document.getElementById('cost-request-count').textContent = totalReqs;
+
+    renderCostBySession(data.by_session || [], byModel);
+    renderCostByModel(byModel);
+    renderCostByProvider(byModel);
+}
+
+function renderCostBySession(bySess, byModel) {
+    const modelCostMap = {};
+    byModel.forEach(m => { modelCostMap[m.model] = m; });
+
+    const tbody = document.getElementById('cost-by-session');
+    if (bySess.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">No data</td></tr>';
+        return;
+    }
+    tbody.innerHTML = bySess.map(s => {
+        const cost = s.models.reduce((sum, model) => {
+            const mc = modelCostMap[model];
+            if (!mc) return sum;
+            const price = lookupProviderPrice(model);
+            return sum + s.input_tokens * (price ? price.in : 5) / 1e6
+                       + s.output_tokens * (price ? price.out : 25) / 1e6;
+        }, 0);
+        // Simpler: compute per-session cost from its own token counts using first matched model price
+        const price = lookupProviderPrice(s.models[0]);
+        const sessionCost = s.input_tokens * (price ? price.in : 5) / 1e6
+                          + s.output_tokens * (price ? price.out : 25) / 1e6;
+        const label = sessionCache[s.session_id] || s.session_label;
+        return `<tr>
+            <td title="${esc(s.session_id)}">${esc(label)}</td>
+            <td style="font-size:0.72rem;color:var(--text-muted)">${esc(s.models.join(', '))}</td>
+            <td>${s.request_count}</td>
+            <td>${formatTokens(s.input_tokens)} / ${formatTokens(s.output_tokens)}</td>
+            <td>${formatCostValue(sessionCost)}</td>
+        </tr>`;
+    }).join('');
+}
+
+function renderCostByModel(byModel) {
+    const tbody = document.getElementById('cost-by-model');
+    if (byModel.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">No data</td></tr>';
+        return;
+    }
+    tbody.innerHTML = byModel.map(m => `<tr>
+        <td>${esc(m.model)}</td>
+        <td>${m.request_count}</td>
+        <td>${formatTokens(m.input_tokens)} / ${formatTokens(m.output_tokens)}</td>
+        <td>${formatCostValue(m.cost)}</td>
+    </tr>`).join('');
+}
+
+function renderCostByProvider(byModel) {
+    const tbody = document.getElementById('cost-by-provider');
+    const providers = groupByProvider(byModel);
+    if (providers.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">No data</td></tr>';
+        return;
+    }
+    tbody.innerHTML = providers.map(p => `<tr>
+        <td>${esc(p.provider)}</td>
+        <td>${formatTokens(p.input_tokens)}</td>
+        <td>${formatTokens(p.output_tokens)}</td>
+        <td>${formatCostValue(p.cost)}</td>
+    </tr>`).join('');
+}
+
+document.querySelectorAll('.btn-cost-preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-cost-preset').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const { from, to } = COST_PRESETS[btn.dataset.preset]();
+        document.getElementById('cost-from').value = from;
+        document.getElementById('cost-to').value = to;
+        loadCosts();
+    });
+});
+
+document.getElementById('btn-cost-refresh').addEventListener('click', loadCosts);

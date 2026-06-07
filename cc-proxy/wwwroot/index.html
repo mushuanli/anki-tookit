@@ -14,6 +14,7 @@
             <a href="#" data-view="conversation">Conversation</a>
             <a href="#" data-view="mcp">MCP Observer</a>
             <a href="#" data-view="hooks">Hooks</a>
+            <a href="#" data-view="cost">Cost</a>
             <a href="#" data-view="settings">Settings</a>
         </nav>
         <div class="status-bar">
@@ -30,8 +31,14 @@
                 <button id="btn-toggle-capture">Dump Raw</button>
                 <button id="btn-delete-selected" class="hidden" style="background:var(--error)">Delete Selected (<span id="selected-count">0</span>)</button>
                 <span class="sep">|</span>
+                <button id="btn-expand-all" title="Expand all sessions">+ All</button>
+                <button id="btn-collapse-all" title="Collapse all sessions">− All</button>
+                <span class="sep">|</span>
                 <label>Upstream:</label>
                 <select id="upstream-select"></select>
+                <span class="sep">|</span>
+                <label>Effort:</label>
+                <select id="effort-select"></select>
             </div>
             <div class="toolbar filter-row">
                 <label>Session:</label>
@@ -155,6 +162,63 @@
                     </thead>
                     <tbody id="hooks-tbody"></tbody>
                 </table>
+            </div>
+        </section>
+
+        <!-- ── Cost View ── -->
+        <section id="view-cost" class="view">
+            <div class="toolbar">
+                <button class="btn-cost-preset active" data-preset="today">Today</button>
+                <button class="btn-cost-preset" data-preset="week">This Week</button>
+                <button class="btn-cost-preset" data-preset="month">This Month</button>
+                <span class="sep">|</span>
+                <label>From:</label>
+                <input type="date" id="cost-from">
+                <label>To:</label>
+                <input type="date" id="cost-to">
+                <button id="btn-cost-refresh">Refresh</button>
+                <span id="cost-loading" class="hidden">Loading...</span>
+            </div>
+            <div class="cost-cards">
+                <div class="cost-card">
+                    <div class="cost-card-label">Total Cost</div>
+                    <div class="cost-card-value" id="cost-total">¥0.0000</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label">Input Tokens</div>
+                    <div class="cost-card-value" id="cost-input-tokens">0</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label">Output Tokens</div>
+                    <div class="cost-card-value" id="cost-output-tokens">0</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label">Requests</div>
+                    <div class="cost-card-value" id="cost-request-count">0</div>
+                </div>
+            </div>
+            <div class="cost-detail-grid">
+                <div class="cost-panel">
+                    <h3>By Session</h3>
+                    <table>
+                        <thead><tr><th>Session</th><th>Models</th><th>Reqs</th><th>In / Out</th><th>Cost</th></tr></thead>
+                        <tbody id="cost-by-session"></tbody>
+                    </table>
+                </div>
+                <div class="cost-panel">
+                    <h3>By Model</h3>
+                    <table>
+                        <thead><tr><th>Model</th><th>Reqs</th><th>In / Out</th><th>Cost</th></tr></thead>
+                        <tbody id="cost-by-model"></tbody>
+                    </table>
+                </div>
+                <div class="cost-panel">
+                    <h3>By Provider</h3>
+                    <table>
+                        <thead><tr><th>Provider</th><th>In</th><th>Out</th><th>Cost</th></tr></thead>
+                        <tbody id="cost-by-provider"></tbody>
+                    </table>
+                </div>
             </div>
         </section>
 

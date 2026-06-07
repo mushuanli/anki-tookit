@@ -24,6 +24,7 @@ pub struct AppState {
     pub providers: RwLock<Vec<Provider>>,
     pub upstreams: RwLock<Vec<UpstreamConfig>>,
     pub active_upstream: RwLock<String>,
+    pub active_effort: RwLock<String>,
     pub retention: RwLock<Retention>,
     pub tee_writer: TeeWriter,
     pub broadcaster: broadcast::Sender<WsMessage>,
@@ -37,6 +38,7 @@ impl AppState {
         let providers = config.proxy.providers.clone();
         let upstreams = config.proxy.upstreams.clone();
         let active_name = config.proxy.active_upstream.clone();
+        let active_effort = config.proxy.active_effort.clone();
         let retention = Retention {
             request_retention_hours: config.proxy.request_retention_hours,
             session_max_count: config.proxy.session_max_count,
@@ -52,6 +54,7 @@ impl AppState {
             providers: RwLock::new(providers),
             upstreams: RwLock::new(upstreams),
             active_upstream: RwLock::new(active_name),
+            active_effort: RwLock::new(active_effort),
             retention: RwLock::new(retention),
             tee_writer: TeeWriter::new(enabled, PathBuf::from("captures")),
             broadcaster: tx,
@@ -112,6 +115,7 @@ impl AppState {
             active_upstream: self.active_upstream.read().await.clone(),
             upstreams: self.upstream_info_list().await,
             providers: self.provider_info_list().await,
+            active_effort: self.active_effort.read().await.clone(),
         }
     }
 
@@ -120,6 +124,7 @@ impl AppState {
         let providers = self.providers.read().await.clone();
         let upstreams = self.upstreams.read().await.clone();
         let active = self.active_upstream.read().await.clone();
+        let active_effort = self.active_effort.read().await.clone();
         let retention = self.retention.read().await.clone();
 
         let content = match std::fs::read_to_string(&self.config_path) {
@@ -149,6 +154,7 @@ impl AppState {
         let up_arr: Vec<toml::Value> = upstreams.iter().map(upstream_to_toml).collect();
         proxy.insert("upstreams".into(), toml::Value::Array(up_arr));
         proxy.insert("active_upstream".into(), toml::Value::String(active));
+        proxy.insert("active_effort".into(), toml::Value::String(active_effort));
 
         // Persist retention
         proxy.insert(
@@ -342,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
         config.proxy.upstreams.len(),
         config.proxy.active_upstream,
     );
+    tracing::info!("Effort level = '{}'", config.proxy.active_effort);
     for u in &config.proxy.upstreams {
         let tier_info = |rule: &Option<TierRule>| -> String {
             match rule {

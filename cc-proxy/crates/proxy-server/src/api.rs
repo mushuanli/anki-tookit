@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -6,6 +7,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Json;
+use chrono::{Duration, Utc};
 use proxy_core::config::{ModelInfo, Provider, TierRule, UpstreamConfig};
 use proxy_core::export::{export_har, export_json, export_markdown};
 use proxy_core::models::{HookEvent, WsMessage};
@@ -57,6 +59,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Retention & cleanup
         .route("/api/retention", get(get_retention).put(update_retention))
         .route("/api/cleanup", post(trigger_cleanup))
+        // Effort
+        .route("/api/effort", get(get_effort).put(set_effort))
+        // Costs
+        .route("/api/costs", get(get_costs))
         // Static files
         .fallback(get(serve_static))
         .with_state(state)
@@ -293,6 +299,7 @@ async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "active_upstream": *state.active_upstream.read().await,
         "upstreams": state.upstream_info_list().await,
         "providers": state.provider_info_list().await,
+        "active_effort": *state.active_effort.read().await,
     }))
 }
 
@@ -717,4 +724,61 @@ fn not_found(msg: &str) -> Response<Body> {
 
 fn internal_error(msg: &str) -> Response<Body> {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+// ── Effort ──
+
+const VALID_EFFORTS: &[&str] = &["auto", "low", "medium", "high", "xhigh", "max", "ultracode"];
+
+async fn get_effort(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({"effort": *state.active_effort.read().await}))
+}
+
+async fn set_effort(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response<Body> {
+    let effort = match payload["effort"].as_str() {
+        Some(e) => e.to_string(),
+        None => return bad_request("Missing 'effort' field"),
+    };
+    if !VALID_EFFORTS.contains(&effort.as_str()) {
+        return bad_request(&format!(
+            "Invalid effort '{}'. Valid: {}",
+            effort,
+            VALID_EFFORTS.join(", ")
+        ));
+    }
+    *state.active_effort.write().await = effort.clone();
+    state.persist_config().await;
+    let msg = state.upstream_changed_msg().await;
+    let _ = state.broadcast_send(msg);
+    Json(serde_json::json!({"ok": true, "effort": effort})).into_response()
+}
+
+// ── Costs ──
+
+async fn get_costs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response<Body> {
+    let now = Utc::now();
+    let default_from = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .to_rfc3339();
+    let default_to = (now.date_naive() + Duration::days(1))
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .to_rfc3339();
+    let from = params.get("from").map(|s| s.as_str()).unwrap_or(&default_from);
+    let to = params.get("to").map(|s| s.as_str()).unwrap_or(&default_to);
+
+    match state.db.get_cost_data(from, to) {
+        Ok(data) => Json(data).into_response(),
+        Err(e) => internal_error(&format!("Failed to query costs: {e}")),
+    }
 }
