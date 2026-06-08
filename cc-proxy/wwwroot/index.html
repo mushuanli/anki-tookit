@@ -28,7 +28,7 @@
         <!-- ── Inspector View ── -->
         <section id="view-inspector" class="view active">
             <div class="toolbar">
-                <button id="btn-toggle-capture">Dump Raw</button>
+                <button id="btn-toggle-capture" title="Toggle live traffic recording">Record</button>
                 <button id="btn-delete-selected" class="hidden" style="background:var(--error)">Delete Selected (<span id="selected-count">0</span>)</button>
                 <span class="sep">|</span>
                 <button id="btn-expand-all" title="Expand all sessions">+ All</button>
@@ -39,13 +39,22 @@
                 <span class="sep">|</span>
                 <label>Effort:</label>
                 <select id="effort-select"></select>
+                <span class="sep">|</span>
+                <div id="inspector-cost-stats" class="inspector-cost-stats">
+                    <span class="cost-stat" title="Current upstream today tokens (in/out)"><span class="cost-stat-label">今日 Tokens</span><span id="stat-today-tokens" class="cost-stat-value">—</span></span>
+                    <span class="cost-stat" title="Current upstream today cost"><span class="cost-stat-label">今日费用</span><span id="stat-today-cost" class="cost-stat-value">—</span></span>
+                    <span class="cost-stat" title="Current upstream this month tokens (in/out)"><span class="cost-stat-label">本月 Tokens</span><span id="stat-month-tokens" class="cost-stat-value">—</span></span>
+                    <span class="cost-stat" title="Current upstream this month cost"><span class="cost-stat-label">本月费用</span><span id="stat-month-cost" class="cost-stat-value">—</span></span>
+                </div>
             </div>
             <div class="toolbar filter-row">
                 <label>Session:</label>
                 <select id="filter-session">
-                    <option value="">All Sessions</option>
+                    <option value="__all__">All</option>
+                    <option value="" selected>All Sessions</option>
                 </select>
                 <button id="btn-session-export" class="hidden">Export</button>
+                <button id="btn-session-save-yaml" class="hidden">Save YAML</button>
                 <button id="btn-session-rename" class="hidden">Rename</button>
                 <button id="btn-session-delete" class="hidden btn-danger">Delete Session</button>
                 <span class="sep">|</span>

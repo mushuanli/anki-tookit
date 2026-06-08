@@ -13,7 +13,7 @@ let _silentTimer = null;
 // ── Pagination & filter state ──
 let currentPage = 1;
 let pageSize = 50;
-let filterModel = '';
+let filterModel = '__has_model__';
 let filterSession = '';
 let filterTimeFrom = '';
 let filterTimeTo = '';
@@ -147,8 +147,14 @@ const requestRows = new Map();
 function getFilteredRequests() {
     let result = [];
     for (const req of requestRows.values()) {
-        if (filterModel && req.model !== filterModel) continue;
-        if (filterSession && req.session_id !== filterSession) continue;
+        if (filterModel === '__has_model__' && !req.model) continue;
+        if (filterModel && filterModel !== '__has_model__' && req.model !== filterModel) continue;
+        // filterSession: "__all__" = no filter, "" = only with session_id, "<id>" = exact match
+        if (filterSession === '') {
+            if (!req.session_id) continue;
+        } else if (filterSession && filterSession !== '__all__' && req.session_id !== filterSession) {
+            continue;
+        }
         if (filterTimeFrom && new Date(req.timestamp) < new Date(filterTimeFrom)) continue;
         if (filterTimeTo && new Date(req.timestamp) > new Date(filterTimeTo)) continue;
         result.push(req);
@@ -313,6 +319,7 @@ function renderPage() {
 
     updatePagination(groups.length, totalPages);
     updateSelectionUI();
+    updateInspectorCostStats();
 }
 
 function updatePagination(total, totalPages) {
@@ -713,6 +720,7 @@ function applyUpstreamState(active, upstreams, providers, effort) {
     renderProviderList();
     renderUpstreamList();
     refreshProviderSelects();
+    updateInspectorCostStats();
 }
 
 // ── Settings: Providers ──
@@ -1029,9 +1037,16 @@ document.getElementById('btn-toggle-capture').addEventListener('click', async ()
 
 function updateCaptureButton() {
     const btn = document.getElementById('btn-toggle-capture');
-    btn.textContent = captureEnabled ? 'Dumping...' : 'Dump Raw';
-    btn.style.background = captureEnabled ? 'var(--accent)' : '';
-    document.getElementById('capture-status').textContent = captureEnabled ? 'Dumping' : '';
+    const status = document.getElementById('capture-status');
+    if (captureEnabled) {
+        btn.textContent = 'Recording...';
+        btn.classList.add('recording');
+        status.innerHTML = '<span class="rec-dot"></span> REC';
+    } else {
+        btn.textContent = 'Record';
+        btn.classList.remove('recording');
+        status.innerHTML = '';
+    }
 }
 
 // ── Session actions ──
@@ -1039,10 +1054,11 @@ function updateCaptureButton() {
 async function refreshSessionActions() {
     const sid = filterSession;
     const exportBtn = document.getElementById('btn-session-export');
+    const saveYamlBtn = document.getElementById('btn-session-save-yaml');
     const renameBtn = document.getElementById('btn-session-rename');
     const deleteBtn = document.getElementById('btn-session-delete');
-    if (!sid) {
-        [exportBtn, renameBtn, deleteBtn].forEach(b => b.classList.add('hidden'));
+    if (!sid || sid === '__all__') {
+        [exportBtn, saveYamlBtn, renameBtn, deleteBtn].forEach(b => b.classList.add('hidden'));
         return;
     }
     let session = null;
@@ -1050,8 +1066,9 @@ async function refreshSessionActions() {
         const resp = await fetch(`/api/session/${encodeURIComponent(sid)}`);
         session = (await resp.json()).session;
     } catch { /* ignore */ }
-    [exportBtn, renameBtn, deleteBtn].forEach(b => b.classList.remove('hidden'));
+    [exportBtn, saveYamlBtn, renameBtn, deleteBtn].forEach(b => b.classList.remove('hidden'));
     exportBtn.onclick = () => window.open(`/api/session/${encodeURIComponent(sid)}/export?format=json`, '_blank');
+    saveYamlBtn.onclick = () => window.open(`/api/session/${encodeURIComponent(sid)}/export?format=yaml`, '_blank');
     renameBtn.onclick = () => {
         const current = session?.label || sid.substring(0, 8);
         const label = prompt('New name:', current);
@@ -1080,10 +1097,9 @@ function updateFilterOptions() {
     const models = new Set();
     requestRows.forEach(r => { if (r.model) models.add(r.model); });
     const modelSelect = document.getElementById('filter-model');
-    const currentModel = modelSelect.value;
-    modelSelect.innerHTML = '<option value="">All Models</option>';
+    modelSelect.innerHTML = '<option value="">All</option><option value="__has_model__">All Models</option>';
     models.forEach(m => { modelSelect.innerHTML += `<option value="${esc(m)}">${esc(m)}</option>`; });
-    modelSelect.value = currentModel;
+    modelSelect.value = filterModel;
 
     const sessionsInData = new Set();
     requestRows.forEach(r => { if (r.session_id) sessionsInData.add(r.session_id); });
@@ -1119,7 +1135,7 @@ function updateFilterOptions() {
 function renderSessionSelect(sessionsInData) {
     const sessionSelect = document.getElementById('filter-session');
     const current = sessionSelect.value;
-    sessionSelect.innerHTML = '<option value="">All Sessions</option>';
+    sessionSelect.innerHTML = '<option value="__all__">All</option><option value="">All Sessions</option>';
     sessionsInData.forEach(s => {
         const label = sessionCache[s] || s.substring(0, 8);
         sessionSelect.innerHTML += `<option value="${esc(s)}">${esc(label)} (${esc(s.substring(0, 8))})</option>`;
@@ -1136,14 +1152,15 @@ document.getElementById('filter-model').addEventListener('change', () => { filte
 document.getElementById('filter-session').addEventListener('change', () => {
     filterSession = document.getElementById('filter-session').value;
     expandedSessions.clear();
-    if (filterSession) {
-        // Auto-expand the selected session
+    if (filterSession && filterSession !== '__all__') {
+        // Specific session selected — auto-expand it
         expandedSessions.add(filterSession);
-    } else {
-        // "All Sessions" — expand latest only
+    } else if (filterSession === '') {
+        // "All Sessions" — expand latest session only
         const groups = getSessionGroups();
         if (groups.length > 0) expandedSessions.add(groups[0].session_id);
     }
+    // "__all__" — no auto-expand
     refreshSessionActions();
     applyFiltersAndRender();
 });
@@ -1399,9 +1416,9 @@ function clearAllTables() {
     requestRows.clear();
     expandedSessions.clear();
     currentPage = 1;
-    filterModel = ''; filterSession = ''; filterTimeFrom = ''; filterTimeTo = '';
-    document.getElementById('filter-model').value = '';
-    document.getElementById('filter-session').innerHTML = '<option value="">All Sessions</option>';
+    filterModel = '__has_model__'; filterSession = ''; filterTimeFrom = ''; filterTimeTo = '';
+    document.getElementById('filter-model').value = '__has_model__';
+    document.getElementById('filter-session').innerHTML = '<option value="__all__">All</option><option value="">All Sessions</option>';
     document.getElementById('filter-time-from').value = '';
     document.getElementById('filter-time-to').value = '';
     document.getElementById('requests-tbody').innerHTML = '';
@@ -1518,7 +1535,63 @@ document.getElementById('btn-cleanup-now').addEventListener('click', async () =>
     btn.textContent = 'Clean Up Now';
 });
 
-// ── Cost view ──
+// ── Inspector toolbar cost stats ──
+
+function calcInspectorCostStats() {
+    const now = new Date();
+    const todayStr = localDateStr(now);
+    const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    // Determine which providers belong to the active upstream
+    const upstreamProviders = getActiveUpstreamProviders();
+
+    let todayIn = 0, todayOut = 0, todayCost = 0;
+    let monthIn = 0, monthOut = 0, monthCost = 0;
+
+    for (const req of requestRows.values()) {
+        if (!req.model || !req.timestamp) continue;
+        if (!isReqFromUpstreamProviders(req, upstreamProviders)) continue;
+
+        const price = lookupProviderPrice(req.model);
+        if (!price) continue;
+
+        const inTok = req.input_tokens ?? 0;
+        const outTok = req.output_tokens ?? 0;
+        const cost = inTok * price.in / 1_000_000 + outTok * price.out / 1_000_000;
+        const ts = req.timestamp.substring(0, 10);
+
+        if (ts === todayStr) { todayIn += inTok; todayOut += outTok; todayCost += cost; }
+        if (ts.startsWith(monthStr)) { monthIn += inTok; monthOut += outTok; monthCost += cost; }
+    }
+
+    return { todayIn, todayOut, todayCost, monthIn, monthOut, monthCost };
+}
+
+function getActiveUpstreamProviders() {
+    if (!activeUpstream) return null;  // null = no filter
+    const upstream = upstreamList.find(u => u.name === activeUpstream);
+    if (!upstream) return null;
+    return new Set([
+        upstream.high?.provider, upstream.mid?.provider,
+        upstream.low?.provider, upstream.default_provider,
+    ].filter(Boolean));
+}
+
+function isReqFromUpstreamProviders(req, providerSet) {
+    if (!providerSet) return false;
+    const p = providerList.find(pv => pv.models?.some(m => m.id === req.model));
+    return p ? providerSet.has(p.name) : false;
+}
+
+function updateInspectorCostStats() {
+    const { todayIn, todayOut, todayCost, monthIn, monthOut, monthCost } = calcInspectorCostStats();
+    document.getElementById('stat-today-tokens').textContent = `${formatTokens(todayIn)}/${formatTokens(todayOut)}`;
+    document.getElementById('stat-today-cost').textContent = todayCost > 0 ? `¥${todayCost.toFixed(3)}` : '¥0';
+    document.getElementById('stat-month-tokens').textContent = `${formatTokens(monthIn)}/${formatTokens(monthOut)}`;
+    document.getElementById('stat-month-cost').textContent = monthCost > 0 ? `¥${monthCost.toFixed(3)}` : '¥0';
+}
+
+
 
 function localDateStr(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

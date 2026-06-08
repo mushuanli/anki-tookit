@@ -9,7 +9,7 @@ use axum::routing::{get, post, put};
 use axum::Json;
 use chrono::{Duration, Utc};
 use proxy_core::config::{ModelInfo, Provider, TierRule, UpstreamConfig};
-use proxy_core::export::{export_har, export_json, export_markdown};
+use proxy_core::export::{export_har, export_json, export_markdown, export_yaml};
 use proxy_core::models::{HookEvent, WsMessage};
 use serde::Deserialize;
 
@@ -522,7 +522,18 @@ async fn export_session(
                 md,
             ).into_response()
         }
-        _ => bad_request("Unsupported format. Use: json, har, markdown"),
+        "yaml" | "yml" => {
+            let yaml = export_yaml(&session, &requests);
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/x-yaml; charset=utf-8"),
+                    ("content-disposition", &format!("attachment; filename=\"session_{}.yaml\"", session.id)),
+                ],
+                yaml,
+            ).into_response()
+        }
+        _ => bad_request("Unsupported format. Use: json, har, markdown, yaml"),
     }
 }
 
