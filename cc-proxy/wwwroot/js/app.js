@@ -1520,28 +1520,28 @@ document.getElementById('btn-cleanup-now').addEventListener('click', async () =>
 
 // ── Cost view ──
 
+function localDateStr(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 const COST_PRESETS = {
     today: () => {
         const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        const from = d.toISOString().slice(0, 10);
-        const to = new Date(d.getTime() + 86400000).toISOString().slice(0, 10);
+        const from = localDateStr(d);
+        const to = localDateStr(new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1));
         return { from, to };
     },
     week: () => {
         const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        const start = new Date(d);
-        start.setDate(d.getDate() - d.getDay());
-        const end = new Date(start);
-        end.setDate(start.getDate() + 7);
-        return { from: start.toISOString().slice(0, 10), to: end.toISOString().slice(0, 10) };
+        const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay());
+        const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
+        return { from: localDateStr(start), to: localDateStr(end) };
     },
     month: () => {
         const d = new Date();
         const from = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
-        const nextMonth = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-        return { from, to: nextMonth.toISOString().slice(0, 10) };
+        const to = localDateStr(new Date(d.getFullYear(), d.getMonth() + 1, 1));
+        return { from, to };
     },
 };
 
