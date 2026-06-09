@@ -55,6 +55,7 @@
                 </select>
                 <button id="btn-session-export" class="hidden">Export</button>
                 <button id="btn-session-save-yaml" class="hidden">Save YAML</button>
+                <button id="btn-session-summary" class="hidden">Summary</button>
                 <button id="btn-session-rename" class="hidden">Rename</button>
                 <button id="btn-session-delete" class="hidden btn-danger">Delete Session</button>
                 <span class="sep">|</span>
@@ -384,6 +385,17 @@
             </div>
         </section>
     </main>
+
+    <!-- ── Summary Panel ── -->
+    <div id="summary-panel" class="summary-panel hidden">
+        <div class="summary-header">
+            <span id="summary-title">Session Summary</span>
+            <button id="btn-summary-close" class="summary-close-btn">&#10005;</button>
+        </div>
+        <div id="summary-content" class="summary-content">
+            <div class="summary-loading">Loading…</div>
+        </div>
+    </div>
 
     <!-- ── Fullscreen overlay ── -->
     <div id="fullscreen-overlay" class="fullscreen-overlay hidden">

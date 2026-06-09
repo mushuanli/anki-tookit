@@ -4,6 +4,7 @@ pub mod export;
 pub mod models;
 pub mod sse;
 pub mod store;
+pub mod summary;
 
 pub use config::{AppConfig, Provider, TierRule, UpstreamConfig};
 pub use db::Database;

@@ -50,6 +50,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             get(get_session).put(rename_session).delete(delete_session),
         )
         .route("/api/session/:id/export", get(export_session))
+        .route("/api/session/:id/summary", get(session_summary))
         // Requests
         .route("/api/request/:id", get(get_request).delete(delete_single_request))
         .route("/api/requests", get(list_requests).delete(delete_requests_batch))
@@ -545,6 +546,38 @@ async fn export_session(
             ).into_response()
         }
         _ => bad_request("Unsupported format. Use: json, har, markdown, yaml"),
+    }
+}
+
+async fn session_summary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Confirm session exists
+    match state.db.get_session(&id) {
+        Ok(None) | Err(_) => return not_found("Session not found"),
+        _ => {}
+    }
+
+    // Get the latest request (list_requests returns DESC by timestamp, limit 1)
+    let requests = state
+        .db
+        .list_requests(Some(&id), None, None, None, Some(1))
+        .unwrap_or_default();
+
+    let mut latest = match requests.into_iter().next() {
+        Some(r) => r,
+        None => return not_found("No requests found for this session"),
+    };
+
+    // Load SSE events from DB (same pattern as export_yaml in api.rs)
+    if let Ok(events) = state.db.get_sse_events(&latest.id) {
+        latest.sse_events = events;
+    }
+
+    match proxy_core::summary::analyze_request(&latest) {
+        Some(summary) => Json(serde_json::to_value(summary).unwrap_or_default()).into_response(),
+        None => bad_request("No request body found — session may predate recording"),
     }
 }
 

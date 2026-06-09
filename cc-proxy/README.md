@@ -1,20 +1,25 @@
 # CC Proxy
 
-Claude Code API 透明代理 — 拦截、可视化、分析 AI Coding Agent 的 API 流量。支持多 Provider 切换、Tier 路由、费用统计、会话回放。
+Claude Code API 透明代理 — 拦截、可视化、分析 AI Coding Agent 的 API 流量。支持多 Provider 切换、Tier 路由、费用统计、会话回放, 并且可以查看会话过程， 用于总结提高使用技能。
+优点: 
+ - 支持多个供应商，并且可以配置不同模型组合，在网页端一键切换。
+ - 不仅实现同一供应商不同模型，更可以实现不同供应商不同模型方式。proxy会根据当前请求的模型id正确路由到对应供应商。
+ - 可以快速切换提供商，实现费用精准控制。
+ - 实时统计当日/当月费用，实现跨会话统计，更好控制成本。
+ - 可以回放/分析会话内容，复盘改动内容和解决思路。
 
 ![alt text](cc-proxy.png)
-
 ## 安装
 
 ### 1. 构建
 
 ```bash
 # 需要 Rust 1.80+
-git clone https://github.com/tndata/cc-proxy.git
+git clone git@github.com:mushuanli/anki-tookit.git
 cd cc-proxy
 
-cargo build -p proxy-server --release
-cargo build -p proxy-hook-agent --release
+cargo build --release
+cargo run --release
 ```
 
 ### 2. 配置 Claude Code
