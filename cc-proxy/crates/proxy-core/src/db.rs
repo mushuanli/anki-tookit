@@ -101,10 +101,15 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_mcp_timestamp ON mcp_requests(timestamp);
             ",
         )?;
-        // Add total_input_tokens / total_output_tokens columns if not present (idempotent).
+        // Idempotent column additions.
         let _ = conn.execute_batch(
             "ALTER TABLE requests ADD COLUMN total_input_tokens INTEGER;
              ALTER TABLE requests ADD COLUMN total_output_tokens INTEGER;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN total_input_tokens  INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN request_count       INTEGER NOT NULL DEFAULT 0;",
         );
         Ok(())
     }
@@ -158,7 +163,9 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, label, started_at, ended_at, status FROM sessions WHERE id = ?1",
+            "SELECT id, label, started_at, ended_at, status,
+             total_input_tokens, total_output_tokens, request_count
+             FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], |row| row_to_session(row))?;
         match rows.next() {
@@ -185,9 +192,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let pattern = query.map(|q| format!("%{}%", q));
         let (sql, has_param) = if pattern.is_some() {
-            ("SELECT id, label, started_at, ended_at, status FROM sessions WHERE id LIKE ?1 OR label LIKE ?1 ORDER BY started_at DESC", true)
+            ("SELECT id, label, started_at, ended_at, status, total_input_tokens, total_output_tokens, request_count FROM sessions WHERE id LIKE ?1 OR label LIKE ?1 ORDER BY started_at DESC", true)
         } else {
-            ("SELECT id, label, started_at, ended_at, status FROM sessions ORDER BY started_at DESC", false)
+            ("SELECT id, label, started_at, ended_at, status, total_input_tokens, total_output_tokens, request_count FROM sessions ORDER BY started_at DESC", false)
         };
         let mut stmt = conn.prepare(sql)?;
         let rows: Vec<Session> = if has_param {
@@ -217,9 +224,8 @@ impl Database {
             "INSERT INTO requests (id, session_id, timestamp, method, path, model,
              status_code, input_tokens, output_tokens, cache_creation_input_tokens,
              cache_read_input_tokens, duration_ms, ttft_ms, stop_reason, message_id,
-             error, request_headers, request_body, content_text, is_streaming,
-             total_input_tokens, total_output_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+             error, request_headers, request_body, content_text, is_streaming)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 req.id,
                 req.session_id,
@@ -241,8 +247,6 @@ impl Database {
                 req.request_body,
                 req.content_text,
                 req.is_streaming as i32,
-                req.total_input_tokens.map(|v| v as i64),
-                req.total_output_tokens.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -254,9 +258,8 @@ impl Database {
             "UPDATE requests SET status_code=?1, input_tokens=?2, output_tokens=?3,
              cache_creation_input_tokens=?4, cache_read_input_tokens=?5,
              duration_ms=?6, ttft_ms=?7, stop_reason=?8, message_id=?9,
-             error=?10, content_text=?11, model=?12,
-             total_input_tokens=?13, total_output_tokens=?14
-             WHERE id=?15",
+             error=?10, content_text=?11, model=?12
+             WHERE id=?13",
             params![
                 req.status_code,
                 req.input_tokens,
@@ -270,8 +273,6 @@ impl Database {
                 req.error,
                 req.content_text,
                 req.model,
-                req.total_input_tokens.map(|v| v as i64),
-                req.total_output_tokens.map(|v| v as i64),
                 req.id,
             ],
         )?;
@@ -366,18 +367,6 @@ impl Database {
     pub fn count_requests(&self) -> Result<i64, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
-    }
-
-    /// Sum input_tokens and output_tokens for all completed requests in a session,
-    /// used to compute running totals when a new request completes.
-    pub fn sum_session_tokens(&self, session_id: &str) -> Result<(u64, u64), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
-             FROM requests WHERE session_id = ?1 AND status_code IS NOT NULL",
-            params![session_id],
-            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
-        )
     }
 
     /// Aggregate cost data over a time range for the Cost view.
@@ -479,6 +468,8 @@ impl Database {
     }
 
     /// Delete requests older than `hours`, except those in `keep_session_id`.
+    /// Before deleting, aggregates token counts into the sessions table so historical
+    /// stats are preserved even after requests are gone.
     /// SSE events are cascade-deleted. Returns count of deleted rows.
     pub fn cleanup_old_requests(
         &self,
@@ -486,6 +477,52 @@ impl Database {
         keep_session_id: Option<&str>,
     ) -> Result<usize, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
+
+        // Step 1: persist aggregated stats into sessions before deleting requests.
+        match keep_session_id {
+            Some(sid) => {
+                conn.execute(
+                    "UPDATE sessions SET
+                       total_input_tokens  = COALESCE((
+                           SELECT SUM(input_tokens)  FROM requests
+                           WHERE session_id = sessions.id AND status_code IS NOT NULL), 0),
+                       total_output_tokens = COALESCE((
+                           SELECT SUM(output_tokens) FROM requests
+                           WHERE session_id = sessions.id AND status_code IS NOT NULL), 0),
+                       request_count       = COALESCE((
+                           SELECT COUNT(*) FROM requests
+                           WHERE session_id = sessions.id), 0)
+                     WHERE id IN (
+                       SELECT DISTINCT session_id FROM requests
+                       WHERE timestamp < datetime('now', '-' || ?1 || ' hours')
+                         AND session_id IS NOT NULL AND session_id != ?2
+                     )",
+                    params![hours, sid],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "UPDATE sessions SET
+                       total_input_tokens  = COALESCE((
+                           SELECT SUM(input_tokens)  FROM requests
+                           WHERE session_id = sessions.id AND status_code IS NOT NULL), 0),
+                       total_output_tokens = COALESCE((
+                           SELECT SUM(output_tokens) FROM requests
+                           WHERE session_id = sessions.id AND status_code IS NOT NULL), 0),
+                       request_count       = COALESCE((
+                           SELECT COUNT(*) FROM requests
+                           WHERE session_id = sessions.id), 0)
+                     WHERE id IN (
+                       SELECT DISTINCT session_id FROM requests
+                       WHERE timestamp < datetime('now', '-' || ?1 || ' hours')
+                         AND session_id IS NOT NULL
+                     )",
+                    params![hours],
+                )?;
+            }
+        }
+
+        // Step 2: delete the requests.
         let n = match keep_session_id {
             Some(sid) => conn.execute(
                 "DELETE FROM requests WHERE
@@ -674,8 +711,7 @@ fn request_select_sql(with_where: bool) -> String {
         "SELECT id, session_id, timestamp, method, path, model, status_code,
          input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
          duration_ms, ttft_ms, stop_reason, message_id, error, request_headers,
-         request_body, content_text, is_streaming,
-         total_input_tokens, total_output_tokens
+         request_body, content_text, is_streaming
          FROM requests",
     );
     if with_where {
@@ -709,8 +745,6 @@ fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<ProxiedRequest> {
         request_body: row.get(17)?,
         content_text: row.get(18)?,
         is_streaming: row.get::<_, i32>(19)? != 0,
-        total_input_tokens: row.get::<_, Option<i64>>(20)?.map(|v| v as u64),
-        total_output_tokens: row.get::<_, Option<i64>>(21)?.map(|v| v as u64),
         ..Default::default()
     })
 }
@@ -735,6 +769,9 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         started_at: parse_dt(&row.get::<_, String>(2)?),
         ended_at: row.get::<_, Option<String>>(3)?.map(|s| parse_dt(&s)),
         status: parse_status(&row.get::<_, String>(4)?),
+        total_input_tokens: row.get::<_, i64>(5)? as u64,
+        total_output_tokens: row.get::<_, i64>(6)? as u64,
+        request_count: row.get::<_, i64>(7)? as u64,
         request_ids: Vec::new(),
     })
 }

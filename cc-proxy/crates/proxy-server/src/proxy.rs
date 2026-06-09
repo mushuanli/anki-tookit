@@ -516,7 +516,6 @@ async fn handle_non_streaming_response(
                 }
             }
             captured.duration_ms = Some(start.elapsed().as_millis() as u64);
-            fill_session_totals(&state.db, &mut captured);
             let _ = state.db.insert_request(&captured);
             let _ = state.broadcast_send(WsMessage::NewRequest(captured.clone()));
             state.tee_writer.write_exchange(&captured).await;
@@ -629,8 +628,6 @@ async fn handle_streaming_response(
         captured.response_body = Some(accumulated_body);
         captured.duration_ms = Some(start.elapsed().as_millis() as u64);
         captured.content_text = merge_delta_text(&captured.sse_events);
-        fill_session_totals(&state_clone.db, &mut captured);
-
         let _ = state_clone.db.insert_request(&captured);
         let _ = state_clone
             .db
@@ -744,13 +741,3 @@ fn format_block(text: &str, block_type: &str) -> String {
     }
 }
 
-/// Compute and fill total_input_tokens / total_output_tokens from the session's
-/// existing completed requests plus this request's own token counts.
-fn fill_session_totals(db: &proxy_core::Database, req: &mut ProxiedRequest) {
-    let Some(ref sid) = req.session_id else { return };
-    let (prev_in, prev_out) = db.sum_session_tokens(sid).unwrap_or((0, 0));
-    let this_in = req.input_tokens.unwrap_or(0) as u64;
-    let this_out = req.output_tokens.unwrap_or(0) as u64;
-    req.total_input_tokens = Some(prev_in + this_in);
-    req.total_output_tokens = Some(prev_out + this_out);
-}

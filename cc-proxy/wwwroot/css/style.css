@@ -114,6 +114,10 @@ td.status-5xx { color: var(--error); }
 .session-child.collapsed { display: none; }
 .session-child td { padding-left: 22px; }
 .session-group-spacer td { padding: 0; height: 4px; background: var(--bg); border: none; }
+.session-archived { cursor: default; opacity: 0.6; }
+.session-archived:hover { background: var(--bg-card) !important; }
+.session-archived-inner { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; flex-wrap: wrap; }
+.archived-badge { color: var(--text-muted); font-style: italic; }
 
 /* ── Pagination ── */
 .pagination { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 0; font-size: 0.8rem; color: var(--text-muted); }

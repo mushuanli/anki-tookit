@@ -41,7 +41,7 @@ impl AppState {
         let active_effort = config.proxy.active_effort.clone();
         let retention = Retention {
             request_retention_hours: config.proxy.request_retention_hours,
-            session_max_count: config.proxy.session_max_count,
+            session_max_count:       config.proxy.session_max_count,
         };
 
         let db_path = PathBuf::from("data.db");
@@ -165,6 +165,8 @@ impl AppState {
             "session_max_count".into(),
             toml::Value::Integer(retention.session_max_count as i64),
         );
+        // Remove renamed legacy field
+        proxy.remove("session_retention_days");
 
         // Remove legacy fields
         proxy.remove("api_target");

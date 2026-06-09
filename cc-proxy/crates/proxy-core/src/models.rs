@@ -46,10 +46,6 @@ pub struct ProxiedRequest {
     pub output_tokens: Option<u32>,
     pub cache_creation_input_tokens: Option<u32>,
     pub cache_read_input_tokens: Option<u32>,
-    /// Cumulative input tokens across all requests in the session up to this point.
-    pub total_input_tokens: Option<u64>,
-    /// Cumulative output tokens across all requests in the session up to this point.
-    pub total_output_tokens: Option<u64>,
     // Streaming
     pub sse_events: Vec<SseEvent>,
     pub content_text: Option<String>,
@@ -58,6 +54,8 @@ pub struct ProxiedRequest {
     pub time_to_first_token_ms: Option<u64>,
     // Session tracking
     pub session_id: Option<String>,
+    // Request type: "anthropic" or "mcp"
+    pub request_type: String,
     // Error
     pub error: Option<String>,
 }
@@ -69,6 +67,18 @@ impl ProxiedRequest {
             timestamp: Utc::now(),
             method: method.to_string(),
             path: path.to_string(),
+            request_type: "anthropic".to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn new_mcp(method: &str, path: &str) -> Self {
+        Self {
+            id: short_id(),
+            timestamp: Utc::now(),
+            method: method.to_string(),
+            path: path.to_string(),
+            request_type: "mcp".to_string(),
             ..Default::default()
         }
     }
@@ -137,8 +147,15 @@ pub struct Session {
     pub label: Option<String>,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// IDs of requests currently alive in DB.
     pub request_ids: Vec<String>,
     pub status: SessionStatus,
+    /// Aggregated input tokens (includes deleted requests, updated on cleanup).
+    pub total_input_tokens: u64,
+    /// Aggregated output tokens (includes deleted requests, updated on cleanup).
+    pub total_output_tokens: u64,
+    /// Total historical request count (includes deleted requests).
+    pub request_count: u64,
 }
 
 impl Session {
@@ -153,6 +170,9 @@ impl Session {
             ended_at: None,
             request_ids: Vec::new(),
             status: SessionStatus::Recording,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            request_count: 0,
         }
     }
 

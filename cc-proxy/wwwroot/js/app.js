@@ -166,14 +166,16 @@ function getFilteredRequests() {
 function formatCostNum(req) {
     const price = lookupProviderPrice(req.model);
     if (!price) return 0;
-    const inTotal = req.total_input_tokens ?? req.input_tokens ?? 0;
-    const outTotal = req.total_output_tokens ?? req.output_tokens ?? 0;
+    const inTotal = req.input_tokens ?? 0;
+    const outTotal = req.output_tokens ?? 0;
     return inTotal * price.in / 1_000_000 + outTotal * price.out / 1_000_000;
 }
 
 function getSessionGroups() {
     const filtered = getFilteredRequests();
     const groupsMap = new Map();
+
+    // Build groups from live requests
     for (const req of filtered) {
         const sid = req.session_id || '__no_session__';
         if (!groupsMap.has(sid)) {
@@ -181,12 +183,11 @@ function getSessionGroups() {
                 session_id: sid,
                 label: sessionCache[sid] || sid.substring(0, 8),
                 requests: [],
-                totalIn: 0,
-                totalOut: 0,
-                totalCost: 0,
-                firstTime: req.timestamp,
-                lastTime: req.timestamp,
+                totalIn: 0, totalOut: 0, totalCost: 0,
+                firstTime: req.timestamp, lastTime: req.timestamp,
                 models: new Set(),
+                archived: false,
+                request_count: 0,
             });
         }
         const g = groupsMap.get(sid);
@@ -195,19 +196,61 @@ function getSessionGroups() {
         if (new Date(req.timestamp) < new Date(g.firstTime)) g.firstTime = req.timestamp;
         if (new Date(req.timestamp) > new Date(g.lastTime)) g.lastTime = req.timestamp;
     }
+
+    // Add archived sessions (have metadata but no live requests in current filter)
+    if (filterSession !== '__all__') {
+        for (const [sid, meta] of Object.entries(sessionMeta)) {
+            if (!groupsMap.has(sid)) {
+                groupsMap.set(sid, {
+                    session_id: sid,
+                    label: sessionCache[sid] || sid.substring(0, 8),
+                    requests: [],
+                    totalIn: meta.total_input_tokens || 0,
+                    totalOut: meta.total_output_tokens || 0,
+                    totalCost: 0,
+                    firstTime: meta.started_at,
+                    lastTime: meta.ended_at || meta.started_at,
+                    models: [],
+                    archived: true,
+                    request_count: meta.request_count || 0,
+                });
+            }
+        }
+    }
+
     const result = Array.from(groupsMap.values());
     result.forEach(g => {
-        g.requests.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        // The request with the largest timestamp carries cumulative total_* token counts,
-        // so we take its values as the session-level totals rather than summing across requests.
-        const latest = g.requests[0];
-        g.totalIn = latest.total_input_tokens || 0;
-        g.totalOut = latest.total_output_tokens || 0;
-        g.totalCost = formatCostNum(latest);
-        g.models = Array.from(g.models);
+        if (!g.archived) {
+            g.requests.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            // Sum per-request tokens (cumulative total_* field is removed)
+            g.totalIn = g.requests.reduce((s, r) => s + (r.input_tokens || 0), 0);
+            g.totalOut = g.requests.reduce((s, r) => s + (r.output_tokens || 0), 0);
+            // Use latest request for cost model lookup
+            const latest = g.requests[0];
+            g.totalCost = latest ? formatCostNum(latest) : 0;
+            g.models = Array.from(g.models);
+            g.request_count = g.requests.length;
+        }
     });
     result.sort((a, b) => new Date(b.lastTime) - new Date(a.lastTime));
     return result;
+}
+
+function buildArchivedSessionHTML(group) {
+    const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${group.totalIn}/${group.totalOut}t` : '—';
+    const reqCount = group.request_count || 0;
+    const timeStr = group.lastTime ? formatTime(group.lastTime) : '—';
+    return `<td colspan="12">
+        <div class="session-header-inner session-archived-inner">
+            <span class="session-label">${esc(group.label)}</span>
+            <span class="session-summary">
+                <span class="session-summary-item">${reqCount} req${reqCount !== 1 ? 's' : ''}</span>
+                <span class="session-summary-item archived-badge">archived</span>
+                <span class="session-summary-item">${timeStr}</span>
+                <span class="session-summary-item">${tokens}</span>
+            </span>
+        </div>
+    </td>`;
 }
 
 function buildSessionHeaderHTML(group, isExpanded) {
@@ -216,7 +259,7 @@ function buildSessionHeaderHTML(group, isExpanded) {
     const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${group.totalIn}/${group.totalOut}` : '—';
     const cost = group.totalCost > 0 ? `¥${group.totalCost.toFixed(4)}` : '—';
     const models = group.models.join(', ');
-    return `<td colspan="13">
+    return `<td colspan="12">
         <div class="session-header-inner">
             <span class="session-expand-icon${isExpanded ? ' expanded' : ''}">▶</span>
             <span class="session-label">${esc(group.label)}</span>
@@ -261,8 +304,8 @@ function renderPage() {
 
     const pageGroups = groups.slice(start, start + pageSize);
     pageGroups.forEach((group, idx) => {
-        // Requests without a session ID are rendered as plain rows (no folding)
         if (group.session_id === '__no_session__') {
+            // No-session requests: plain rows, no folding
             group.requests.forEach(req => {
                 const tr = document.createElement('tr');
                 tr.id = `req-${req.id}`;
@@ -273,10 +316,32 @@ function renderPage() {
                 });
                 tbody.appendChild(tr);
             });
+
+        } else if (group.requests.length === 0) {
+            // Case 0: archived session — show compact summary row, no expand
+            const archivedTr = document.createElement('tr');
+            archivedTr.className = 'session-header session-archived';
+            archivedTr.dataset.session = group.session_id;
+            archivedTr.innerHTML = buildArchivedSessionHTML(group);
+            tbody.appendChild(archivedTr);
+
+        } else if (group.requests.length === 1) {
+            // Case 1: single request — render flat, no session header needed
+            const req = group.requests[0];
+            const tr = document.createElement('tr');
+            tr.id = `req-${req.id}`;
+            tr.dataset.session = group.session_id;
+            tr.innerHTML = buildRequestRowHTML(req);
+            tr.addEventListener('click', (e) => {
+                if (e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
+                showRequestDetail(req);
+            });
+            tbody.appendChild(tr);
+
         } else {
+            // Case 2: multiple requests — expandable session group
             const isExpanded = expandedSessions.has(group.session_id);
 
-            // Session header row
             const headerTr = document.createElement('tr');
             headerTr.className = 'session-header';
             headerTr.dataset.session = group.session_id;
@@ -287,7 +352,6 @@ function renderPage() {
             });
             tbody.appendChild(headerTr);
 
-            // Child request rows
             group.requests.forEach(req => {
                 const tr = document.createElement('tr');
                 tr.id = `req-${req.id}`;
@@ -306,7 +370,7 @@ function renderPage() {
         if (idx < pageGroups.length - 1) {
             const spacerTr = document.createElement('tr');
             spacerTr.className = 'session-group-spacer';
-            spacerTr.innerHTML = '<td colspan="13"></td>';
+            spacerTr.innerHTML = '<td colspan="12"></td>';
             tbody.appendChild(spacerTr);
         }
     });
@@ -361,9 +425,6 @@ function buildRequestRowHTML(req) {
     const inOut = (req.input_tokens != null || req.output_tokens != null)
         ? `${req.input_tokens ?? 0}/${req.output_tokens ?? 0}`
         : '—';
-    const totalInOut = (req.total_input_tokens != null || req.total_output_tokens != null)
-        ? `${req.total_input_tokens ?? 0}/${req.total_output_tokens ?? 0}`
-        : '—';
     const costStr = formatCost(req);
 
     return `
@@ -373,9 +434,8 @@ function buildRequestRowHTML(req) {
         <td>${esc(req.path)}</td>
         <td class="${statusClass}">${req.status_code || '—'}</td>
         <td>${esc(req.model || '—')}</td>
-        <td>${esc(req.session_id?.substring(0, 8) || '—')}</td>
+        <td>${esc(sessionCache[req.session_id] || req.session_id?.substring(0, 8) || '—')}</td>
         <td>${inOut}</td>
-        <td>${totalInOut}</td>
         <td class="col-cost">${costStr}</td>
         <td>${req.duration_ms != null ? req.duration_ms + 'ms' : '—'}</td>
         <td>${req.time_to_first_token_ms != null ? req.time_to_first_token_ms + 'ms' : '—'}</td>
@@ -402,8 +462,8 @@ function lookupProviderPrice(model) {
 function formatCost(req) {
     const price = lookupProviderPrice(req.model);
     if (!price) return '—';
-    const inTotal = req.total_input_tokens ?? req.input_tokens ?? 0;
-    const outTotal = req.total_output_tokens ?? req.output_tokens ?? 0;
+    const inTotal = req.input_tokens ?? 0;
+    const outTotal = req.output_tokens ?? 0;
     const inCost = inTotal * price.in / 1_000_000;
     const outCost = outTotal * price.out / 1_000_000;
     const total = inCost + outCost;
@@ -1088,7 +1148,8 @@ async function refreshSessionActions() {
 }
 
 // ── Filters ──
-let sessionCache = {};
+let sessionCache = {};       // session_id → label string (for quick display)
+let sessionMeta = {};        // session_id → full Session object (including aggregated stats)
 let pendingSessionFetches = new Set();
 let _updateFilterTimer = null;
 let _renderPageTimer = null;
@@ -1101,35 +1162,12 @@ function updateFilterOptions() {
     models.forEach(m => { modelSelect.innerHTML += `<option value="${esc(m)}">${esc(m)}</option>`; });
     modelSelect.value = filterModel;
 
+    // Include both live-request sessions and archived sessions (from sessionMeta)
     const sessionsInData = new Set();
     requestRows.forEach(r => { if (r.session_id) sessionsInData.add(r.session_id); });
+    Object.keys(sessionMeta).forEach(sid => sessionsInData.add(sid));
 
-    // Immediately render from cache + fallback (no fetch delay)
     renderSessionSelect(sessionsInData);
-
-    // Only fetch uncached sessions that aren't already in-flight
-    const toFetch = Array.from(sessionsInData).filter(
-        sid => !sessionCache[sid] && !pendingSessionFetches.has(sid)
-    );
-    if (toFetch.length === 0) return;
-
-    toFetch.forEach(sid => pendingSessionFetches.add(sid));
-
-    // Fetch in batches of 5 to avoid flooding the server
-    (async function fetchInBatches() {
-        const BATCH_SIZE = 5;
-        for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
-            const batch = toFetch.slice(i, i + BATCH_SIZE);
-            await Promise.all(batch.map(sid =>
-                fetch(`/api/session/${encodeURIComponent(sid)}`)
-                    .then(r => r.json())
-                    .then(data => { sessionCache[sid] = data.session?.label || sid.substring(0, 8); })
-                    .catch(() => { sessionCache[sid] = sid.substring(0, 8); })
-                    .finally(() => { pendingSessionFetches.delete(sid); })
-            ));
-        }
-        renderSessionSelect(sessionsInData);
-    })();
 }
 
 function renderSessionSelect(sessionsInData) {
@@ -1454,11 +1492,14 @@ fetch('/api/upstreams')
     .then(r => r.json())
     .then(data => applyUpstreamState(data.active_upstream, data.upstreams, data.providers, data.active_effort));
 
-// Pre-fill session cache in one call to avoid N individual fetches
+// Pre-fill session cache and metadata in one call
 fetch('/api/sessions')
     .then(r => r.json())
     .then(sessions => {
-        sessions.forEach(s => { sessionCache[s.id] = s.label || s.id.substring(0, 8); });
+        sessions.forEach(s => {
+            sessionMeta[s.id] = s;
+            sessionCache[s.id] = s.label || s.id.substring(0, 8);
+        });
     })
     .catch(() => {});
 
