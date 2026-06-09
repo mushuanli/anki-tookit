@@ -1174,7 +1174,13 @@ function renderSessionSelect(sessionsInData) {
     const sessionSelect = document.getElementById('filter-session');
     const current = sessionSelect.value;
     sessionSelect.innerHTML = '<option value="__all__">All</option><option value="">All Sessions</option>';
-    sessionsInData.forEach(s => {
+    // Sort sessions by started_at descending, matching Inspector table order
+    const sorted = Array.from(sessionsInData).sort((a, b) => {
+        const ta = sessionMeta[a]?.started_at || '';
+        const tb = sessionMeta[b]?.started_at || '';
+        return tb.localeCompare(ta); // DESC
+    });
+    sorted.forEach(s => {
         const label = sessionCache[s] || s.substring(0, 8);
         sessionSelect.innerHTML += `<option value="${esc(s)}">${esc(label)} (${esc(s.substring(0, 8))})</option>`;
     });

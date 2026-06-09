@@ -194,7 +194,8 @@ pub fn export_markdown(session: &Session, requests: &[ProxiedRequest]) -> String
     md
 }
 
-/// Export a session as YAML — includes full request/response bodies and SSE events.
+/// Export the latest request of a session as YAML — human-readable snapshot.
+/// SSE events are merged into a single `response_text` string instead of a raw event list.
 pub fn export_yaml(session: &Session, requests: &[ProxiedRequest]) -> String {
     let mut map = Map::new();
     map.insert("exported_at".into(), Value::String(Utc::now().to_rfc3339()));
@@ -204,101 +205,103 @@ pub fn export_yaml(session: &Session, requests: &[ProxiedRequest]) -> String {
         serde_json::to_value(session).unwrap_or_default(),
     );
 
-    let reqs: Vec<Value> = requests
-        .iter()
-        .map(|r| {
-            let mut m = Map::new();
-            m.insert("id".into(), Value::String(r.id.clone()));
-            m.insert("timestamp".into(), Value::String(r.timestamp.to_rfc3339()));
-            m.insert("method".into(), Value::String(r.method.clone()));
-            m.insert("path".into(), Value::String(r.path.clone()));
-            if let Some(ref model) = r.model {
-                m.insert("model".into(), Value::String(model.clone()));
-            }
-            if let Some(sc) = r.status_code {
-                m.insert("status_code".into(), Value::Number(sc.into()));
-            }
-            if let Some(dur) = r.duration_ms {
-                m.insert("duration_ms".into(), Value::Number(dur.into()));
-            }
-            if let Some(ttft) = r.time_to_first_token_ms {
-                m.insert("time_to_first_token_ms".into(), Value::Number(ttft.into()));
-            }
-            if let Some(in_tok) = r.input_tokens {
-                m.insert("input_tokens".into(), Value::Number(in_tok.into()));
-            }
-            if let Some(out_tok) = r.output_tokens {
-                m.insert("output_tokens".into(), Value::Number(out_tok.into()));
-            }
-            if let Some(ref reason) = r.stop_reason {
-                m.insert("stop_reason".into(), Value::String(reason.clone()));
-            }
-            if let Some(ref msg_id) = r.message_id {
-                m.insert("message_id".into(), Value::String(msg_id.clone()));
-            }
-            if let Some(ref err) = r.error {
-                m.insert("error".into(), Value::String(err.clone()));
-            }
+    let latest = requests.last().map(|r| build_yaml_request(r));
+    map.insert(
+        "latest_request".into(),
+        latest.unwrap_or(Value::Null),
+    );
 
-            // Request
-            if !r.request_headers.is_empty() {
-                m.insert(
-                    "request_headers".into(),
-                    serde_json::to_value(&r.request_headers).unwrap_or_default(),
-                );
-            }
-            if let Some(ref body) = r.request_body {
-                if let Ok(parsed) = serde_json::from_str::<Value>(body) {
-                    m.insert("request_body".into(), parsed);
-                } else {
-                    m.insert("request_body".into(), Value::String(body.clone()));
-                }
-            }
-
-            // Response
-            if !r.response_headers.is_empty() {
-                m.insert(
-                    "response_headers".into(),
-                    serde_json::to_value(&r.response_headers).unwrap_or_default(),
-                );
-            }
-            if let Some(ref body) = r.response_body {
-                if let Ok(parsed) = serde_json::from_str::<Value>(body) {
-                    m.insert("response_body".into(), parsed);
-                } else {
-                    m.insert("response_body".into(), Value::String(body.clone()));
-                }
-            }
-
-            // SSE events
-            if !r.sse_events.is_empty() {
-                let events: Vec<Value> = r
-                    .sse_events
-                    .iter()
-                    .map(|ev| {
-                        let mut em = Map::new();
-                        if let Some(ref et) = ev.event_type {
-                            em.insert("event_type".into(), Value::String(et.clone()));
-                        }
-                        if let Some(ref data) = ev.data {
-                            if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                                em.insert("data".into(), parsed);
-                            } else {
-                                em.insert("data".into(), Value::String(data.clone()));
-                            }
-                        }
-                        Value::Object(em)
-                    })
-                    .collect();
-                m.insert("sse_events".into(), Value::Array(events));
-            }
-
-            Value::Object(m)
-        })
-        .collect();
-
-    map.insert("requests".into(), Value::Array(reqs));
     serde_yaml::to_string(&Value::Object(map)).unwrap_or_else(|e| format!("# YAML serialize error: {}", e))
+}
+
+fn build_yaml_request(r: &ProxiedRequest) -> Value {
+    let mut m = Map::new();
+    m.insert("id".into(), Value::String(r.id.clone()));
+    m.insert("timestamp".into(), Value::String(r.timestamp.to_rfc3339()));
+    m.insert("method".into(), Value::String(r.method.clone()));
+    m.insert("path".into(), Value::String(r.path.clone()));
+    if let Some(ref model) = r.model {
+        m.insert("model".into(), Value::String(model.clone()));
+    }
+    if let Some(sc) = r.status_code {
+        m.insert("status_code".into(), Value::Number(sc.into()));
+    }
+    if let Some(dur) = r.duration_ms {
+        m.insert("duration_ms".into(), Value::Number(dur.into()));
+    }
+    if let Some(ttft) = r.time_to_first_token_ms {
+        m.insert("time_to_first_token_ms".into(), Value::Number(ttft.into()));
+    }
+    if let Some(in_tok) = r.input_tokens {
+        m.insert("input_tokens".into(), Value::Number(in_tok.into()));
+    }
+    if let Some(out_tok) = r.output_tokens {
+        m.insert("output_tokens".into(), Value::Number(out_tok.into()));
+    }
+    if let Some(ref reason) = r.stop_reason {
+        m.insert("stop_reason".into(), Value::String(reason.clone()));
+    }
+    if let Some(ref msg_id) = r.message_id {
+        m.insert("message_id".into(), Value::String(msg_id.clone()));
+    }
+    if let Some(ref err) = r.error {
+        m.insert("error".into(), Value::String(err.clone()));
+    }
+
+    // Request body (parsed as structured object when valid JSON)
+    if !r.request_headers.is_empty() {
+        m.insert(
+            "request_headers".into(),
+            serde_json::to_value(&r.request_headers).unwrap_or_default(),
+        );
+    }
+    if let Some(ref body) = r.request_body {
+        if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+            m.insert("request_body".into(), parsed);
+        } else {
+            m.insert("request_body".into(), Value::String(body.clone()));
+        }
+    }
+
+    // Response: streaming → merge to response_text; non-streaming → parse response_body
+    if r.is_streaming {
+        let text = extract_response_text(r);
+        if !text.is_empty() {
+            m.insert("response_text".into(), Value::String(text));
+        }
+    } else if let Some(ref body) = r.response_body {
+        if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+            m.insert("response_body".into(), parsed);
+        } else {
+            m.insert("response_body".into(), Value::String(body.clone()));
+        }
+    }
+
+    Value::Object(m)
+}
+
+/// Merge streaming response text: use content_text if available, otherwise
+/// extract text deltas from sse_events.
+fn extract_response_text(r: &ProxiedRequest) -> String {
+    if let Some(ref text) = r.content_text {
+        if !text.is_empty() {
+            return text.clone();
+        }
+    }
+    // Fallback: manually extract delta.text from content_block_delta events
+    r.sse_events
+        .iter()
+        .filter(|ev| ev.event_type.as_deref() == Some("content_block_delta"))
+        .filter_map(|ev| ev.data.as_deref())
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter_map(|v| {
+            v.get("delta")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn status_text(code: Option<u16>) -> &'static str {
@@ -396,7 +399,7 @@ mod tests {
         let yaml = export_yaml(&session, &[sample_request()]);
         assert!(yaml.contains("exported_at:"));
         assert!(yaml.contains("session:"));
-        assert!(yaml.contains("requests:"));
+        assert!(yaml.contains("latest_request:"));
         assert!(yaml.contains("method: POST"));
         assert!(yaml.contains("claude-sonnet-4-6"));
     }

@@ -482,11 +482,10 @@ async fn export_session(
         Ok(Some(s)) => s,
         _ => return not_found("Session not found"),
     };
-    let requests: Vec<_> = session
-        .request_ids
-        .iter()
-        .filter_map(|rid| state.db.get_request(rid).ok().flatten())
-        .collect();
+    let requests = state
+        .db
+        .list_requests(Some(&id), None, None, None, None)
+        .unwrap_or_default();
     let format = query.format.as_deref().unwrap_or("json");
     match format {
         "json" => {
@@ -523,12 +522,24 @@ async fn export_session(
             ).into_response()
         }
         "yaml" | "yml" => {
-            let yaml = export_yaml(&session, &requests);
+            // Pick the latest request by timestamp and load its SSE events.
+            let latest = requests
+                .iter()
+                .max_by_key(|r| &r.timestamp)
+                .cloned()
+                .map(|mut r| {
+                    if let Ok(events) = state.db.get_sse_events(&r.id) {
+                        r.sse_events = events;
+                    }
+                    r
+                });
+            let yaml_requests: Vec<_> = latest.into_iter().collect();
+            let yaml = export_yaml(&session, &yaml_requests);
             (
                 StatusCode::OK,
                 [
                     ("content-type", "application/x-yaml; charset=utf-8"),
-                    ("content-disposition", &format!("attachment; filename=\"session_{}.yaml\"", session.id)),
+                    ("content-disposition", &format!("attachment; filename=\"request_{}.yaml\"", session.id)),
                 ],
                 yaml,
             ).into_response()
